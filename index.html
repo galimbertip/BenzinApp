@@ -119,7 +119,7 @@ function parseCSV(text) {
     const vehicleRaw = obj["auto"]||obj["veicolo"]||"";
 
     const row = {
-      id: crypto.randomUUID(),
+      id: btoa([dateStr||"", kmRaw||"", amtRaw||"", priceRaw||"", i].join("|")).replace(/[^a-zA-Z0-9]/g,"").slice(0,28),
       datetime: dt,
       fuelType: fuelType||"Benzina",
       km: (!isNaN(km) && km!==null) ? km : null,
