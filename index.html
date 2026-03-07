@@ -268,4 +268,513 @@ const INP_SM={...INP,fontSize:13,padding:"8px 12px"};
 
 // ─── AddRefuelModal ───────────────────────────────────────────────────────────
 function AddRefuelModal({vehicle,lastKm,onSave,onClose}){
-  const [fuelType,setFuelType]=useState(vehicle?.fuel&&FUEL_TYPES.includes(vehicle.fuel)?vehicle.fuel:FUEL_TYPES[0
+  const [fuelType,setFuelType]=useState(vehicle?.fuel&&FUEL_TYPES.includes(vehicle.fuel)?vehicle.fuel:FUEL_TYPES[0]);
+  const [km,setKm]=useState(""); const [amount,setAmount]=useState(""); const [price,setPrice]=useState("");
+  const [saving,setSaving]=useState(false);
+  const delta=km&&lastKm?Math.max(0,parseFloat(km)-lastKm):0;
+
+  const save=async()=>{
+    if(!km||!amount||!price){alert("Compila tutti i campi (*)");return;}
+    if(parseFloat(km)<(lastKm||0)&&!confirm(`Km inseriti (${km}) < ultimi registrati (${lastKm}). Continuare?`)) return;
+    setSaving(true);
+    await onSave({id:crypto.randomUUID(),datetime:nowISO(),fuelType,km:parseFloat(km),kmDelta:delta,amount:parseFloat(amount),pricePerLiter:parseFloat(price),vehicle:vehicle?`${vehicle.brand} ${vehicle.model}`:""});
+    setSaving(false);
+  };
+
+  return(
+    <Modal title="⛽ Nuovo Rifornimento" onClose={onClose}>
+      <div style={{marginBottom:12}}>
+        <div style={{fontSize:12,color:"#94a3b8",marginBottom:4}}>📅 Data e ora</div>
+        <div style={{...INP,color:"#64748b",fontSize:14}}>{new Date().toLocaleString("it-IT")} (automatico)</div>
+      </div>
+      {vehicle&&<div style={{marginBottom:12}}>
+        <div style={{fontSize:12,color:"#94a3b8",marginBottom:4}}>🚗 Veicolo</div>
+        <div style={{...INP,color:"#64748b",fontSize:14}}>{vehicle.brand} {vehicle.model}{vehicle.targa?` · ${vehicle.targa}`:""}</div>
+      </div>}
+      <div style={{marginBottom:12}}>
+        <div style={{fontSize:12,color:"#94a3b8",marginBottom:4}}>⛽ Tipo carburante</div>
+        <select value={fuelType} onChange={e=>setFuelType(e.target.value)} style={INP}>{FUEL_TYPES.map(f=><option key={f}>{f}</option>)}</select>
+      </div>
+      <div style={{marginBottom:12}}>
+        <div style={{fontSize:12,color:"#94a3b8",marginBottom:4}}>🛣️ Km attuali *</div>
+        <input type="number" value={km} onChange={e=>setKm(e.target.value)} placeholder={lastKm?`Ultimo: ${lastKm.toLocaleString("it-IT")} km`:"es. 45230"} style={INP}/>
+        {delta>0&&<div style={{fontSize:12,color:"#22d3ee",marginTop:4}}>📍 Percorsi dall'ultimo: {delta.toLocaleString("it-IT")} km</div>}
+      </div>
+      <div style={{marginBottom:12}}>
+        <div style={{fontSize:12,color:"#94a3b8",marginBottom:4}}>💶 Importo pagato (€) *</div>
+        <input type="number" step="0.01" value={amount} onChange={e=>setAmount(e.target.value)} placeholder="es. 65.50" style={INP}/>
+      </div>
+      <div style={{marginBottom:16}}>
+        <div style={{fontSize:12,color:"#94a3b8",marginBottom:4}}>📊 Prezzo al litro (€/L) *</div>
+        <input type="number" step="0.001" value={price} onChange={e=>setPrice(e.target.value)} placeholder="es. 1.879" style={INP}/>
+      </div>
+      {amount&&price&&<div style={{background:"#0f172a",borderRadius:8,padding:10,marginBottom:16,fontSize:13,color:"#94a3b8"}}>
+        🔢 Litri stimati: <span style={{color:"#f59e0b",fontWeight:700}}>{(parseFloat(amount)/parseFloat(price)).toFixed(2)} L</span>
+      </div>}
+      <button onClick={save} disabled={saving} style={{width:"100%",background:saving?"#334155":"linear-gradient(135deg,#1e40af,#7c3aed)",color:"#fff",border:"none",borderRadius:12,padding:14,cursor:saving?"not-allowed":"pointer",fontSize:16,fontWeight:700}}>
+        {saving?"⏳ Salvataggio...":"💾 Salva Rifornimento"}
+      </button>
+    </Modal>
+  );
+}
+
+// ─── VehicleModal ─────────────────────────────────────────────────────────────
+function VehicleModal({onSelect,onClose}){
+  const [mode,setMode]=useState("search"); // search | manual
+  const [step,setStep]=useState("make");
+  const [makes,setMakes]=useState([]); const [models,setModels]=useState([]); const [trims,setTrims]=useState([]);
+  const [selMake,setSelMake]=useState(null); const [selModel,setSelModel]=useState(null); const [selTrim,setSelTrim]=useState(null);
+  const [search,setSearch]=useState(""); const [loading,setLoading]=useState(false); const [err,setErr]=useState(null);
+  const [targa,setTarga]=useState(""); const [fuel,setFuel]=useState("");
+  const [manBrand,setManBrand]=useState(""); const [manModel,setManModel]=useState(""); const [manYear,setManYear]=useState("");
+
+  const PROXY="https://corsproxy.io/?url="; const CQ="https://www.carqueryapi.com/api/0.3/";
+  const cqFetch=async url=>{const r=await fetch(PROXY+encodeURIComponent(url));const t=await r.text();return JSON.parse(t.replace(/^\(|\);?$/g,""));};
+  const fuelMap={G:"Benzina",D:"Diesel",E:"Elettrico",H:"Ibrido",B:"Ibrido"};
+  const fl=f=>fuelMap[f]||f||"N/D";
+
+  useEffect(()=>{
+    setLoading(true); setErr(null);
+    cqFetch(CQ+"?cmd=getMakes&sold_in_us=0").then(j=>setMakes(j.Makes||[])).catch(()=>setErr("Impossibile caricare le marche — usa inserimento manuale.")).finally(()=>setLoading(false));
+  },[]);
+
+  const pickMake=async m=>{setSelMake(m);setSelModel(null);setSelTrim(null);setSearch("");setStep("model");setLoading(true);setErr(null);
+    try{const j=await cqFetch(CQ+`?cmd=getModels&make=${m.make_id}`);setModels(j.Models||[]);}catch{setErr("Impossibile caricare i modelli.");}setLoading(false);};
+  const pickModel=async m=>{setSelModel(m);setSelTrim(null);setSearch("");setStep("trim");setLoading(true);setErr(null);
+    try{const j=await cqFetch(CQ+`?cmd=getTrims&make=${selMake.make_id}&model=${encodeURIComponent(m.model_name)}`);setTrims(j.Trims||[]);}catch{setErr("Impossibile caricare le versioni.");}setLoading(false);};
+  const pickTrim=t=>{setSelTrim(t);setFuel(fl(t.model_engine_type));setStep("confirm");};
+
+  const confirm=()=>{
+    if(mode==="manual"){
+      if(!manBrand||!manModel||!fuel){alert("Compila marca, modello e carburante");return;}
+      onSelect({brand:manBrand,model:manModel,year:manYear,fuel,targa:targa.toUpperCase()});
+    } else {
+      if(!selMake||!selModel||!fuel){alert("Seleziona veicolo e carburante");return;}
+      onSelect({brand:selMake.make_display,model:selModel.model_name,year:selTrim?selTrim.model_year:"",fuel,targa:targa.toUpperCase()});
+    }
+  };
+
+  const fMakes=makes.filter(m=>m.make_display.toLowerCase().includes(search.toLowerCase()));
+  const fModels=models.filter(m=>m.model_name.toLowerCase().includes(search.toLowerCase()));
+
+  return(
+    <Modal title="🔍 Seleziona Veicolo" onClose={onClose}>
+      <div style={{display:"flex",gap:8,marginBottom:14}}>
+        {[["search","🔍 Database"],["manual","✏️ Manuale"]].map(([id,label])=>(
+          <button key={id} onClick={()=>setMode(id)} style={{flex:1,background:mode===id?"#7c3aed":"#334155",color:"#e2e8f0",border:"none",borderRadius:10,padding:8,cursor:"pointer",fontSize:13,fontWeight:mode===id?700:400}}>{label}</button>
+        ))}
+      </div>
+
+      {mode==="manual"?(<>
+        <div style={{fontSize:12,color:"#94a3b8",marginBottom:4}}>Marca *</div>
+        <input value={manBrand} onChange={e=>setManBrand(e.target.value)} placeholder="es. Fiat" style={{...INP,marginBottom:10}}/>
+        <div style={{fontSize:12,color:"#94a3b8",marginBottom:4}}>Modello *</div>
+        <input value={manModel} onChange={e=>setManModel(e.target.value)} placeholder="es. Tipo Cross" style={{...INP,marginBottom:10}}/>
+        <div style={{fontSize:12,color:"#94a3b8",marginBottom:4}}>Anno</div>
+        <input value={manYear} onChange={e=>setManYear(e.target.value)} placeholder="es. 2022" style={{...INP,marginBottom:10}}/>
+        <div style={{fontSize:12,color:"#94a3b8",marginBottom:4}}>⛽ Carburante *</div>
+        <select value={fuel} onChange={e=>setFuel(e.target.value)} style={{...INP,marginBottom:10}}>
+          <option value="">— Seleziona —</option>
+          {FUEL_TYPES.map(f=><option key={f}>{f}</option>)}
+        </select>
+        <div style={{fontSize:12,color:"#94a3b8",marginBottom:4}}>Targa</div>
+        <input value={targa} onChange={e=>setTarga(e.target.value.toUpperCase())} placeholder="es. AB123CD" maxLength={8} style={{...INP,marginBottom:14}}/>
+        <button onClick={confirm} style={{width:"100%",background:"linear-gradient(135deg,#1e40af,#7c3aed)",color:"#fff",border:"none",borderRadius:12,padding:14,cursor:"pointer",fontSize:15,fontWeight:700}}>✅ Conferma</button>
+      </>):(<>
+        {/* breadcrumb */}
+        <div style={{display:"flex",gap:6,marginBottom:10,flexWrap:"wrap"}}>
+          {[{s:"make",l:selMake?selMake.make_display:"Marca"},selMake&&{s:"model",l:selModel?selModel.model_name:"Modello"},selModel&&{s:"trim",l:"Versione"},selModel&&{s:"confirm",l:"✅ Conferma"}].filter(Boolean).map((b,i)=>(
+            <button key={i} onClick={()=>setStep(b.s)} style={{background:step===b.s?"#7c3aed":"#334155",color:"#e2e8f0",border:"none",borderRadius:20,padding:"4px 12px",cursor:"pointer",fontSize:12,fontWeight:step===b.s?700:400}}>{b.l}</button>
+          ))}
+        </div>
+        {err&&<div style={{background:"#7f1d1d",borderRadius:8,padding:10,fontSize:13,marginBottom:10,color:"#fca5a5"}}>⚠️ {err} <span style={{fontSize:11}}>→ Usa inserimento manuale</span></div>}
+
+        {step==="make"&&<>
+          <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Filtra marca..." style={{...INP,marginBottom:8}}/>
+          {loading&&<div style={{color:"#64748b",fontSize:13,textAlign:"center",padding:20}}>⏳ Caricamento...</div>}
+          <div style={{maxHeight:300,overflowY:"auto"}}>
+            {fMakes.map((m,i)=><div key={i} onClick={()=>pickMake(m)} style={{background:"#0f172a",borderRadius:10,padding:"11px 14px",marginBottom:6,cursor:"pointer",display:"flex",justifyContent:"space-between"}}><span style={{fontWeight:600}}>{m.make_display}</span><span style={{color:"#7c3aed"}}>›</span></div>)}
+          </div>
+        </>}
+        {step==="model"&&<>
+          <input value={search} onChange={e=>setSearch(e.target.value)} placeholder={`Modello ${selMake?.make_display}...`} style={{...INP,marginBottom:4}}/>
+          <div style={{fontSize:11,color:"#64748b",marginBottom:8}}>💡 Non trovi il modello? Usa "Manuale"</div>
+          {loading&&<div style={{color:"#64748b",fontSize:13,textAlign:"center",padding:20}}>⏳ Caricamento...</div>}
+          <div style={{maxHeight:280,overflowY:"auto"}}>
+            {fModels.map((m,i)=><div key={i} onClick={()=>pickModel(m)} style={{background:"#0f172a",borderRadius:10,padding:"11px 14px",marginBottom:6,cursor:"pointer",display:"flex",justifyContent:"space-between"}}><span style={{fontWeight:600}}>{m.model_name}</span><span style={{color:"#7c3aed"}}>›</span></div>)}
+          </div>
+        </>}
+        {step==="trim"&&<>
+          <div style={{fontSize:13,color:"#94a3b8",marginBottom:8}}>Versione (opzionale)</div>
+          {loading&&<div style={{color:"#64748b",fontSize:13,textAlign:"center",padding:20}}>⏳ Caricamento...</div>}
+          <div style={{maxHeight:240,overflowY:"auto"}}>
+            <div onClick={()=>{setSelTrim(null);setStep("confirm");}} style={{background:"#0f172a",borderRadius:10,padding:"11px 14px",marginBottom:6,cursor:"pointer",border:"1px dashed #334155"}}>
+              <span style={{fontSize:13,color:"#64748b"}}>⏭ Salta</span>
+            </div>
+            {trims.map((t,i)=><div key={i} onClick={()=>pickTrim(t)} style={{background:"#0f172a",borderRadius:10,padding:"11px 14px",marginBottom:6,cursor:"pointer"}}>
+              <div style={{fontWeight:600,fontSize:13}}>{t.model_year} · {t.model_trim||"—"}</div>
+              <div style={{fontSize:11,color:"#94a3b8",marginTop:2}}>{t.model_engine_cc?`${t.model_engine_cc}cc`:""}{t.model_engine_power_hp?` · ${t.model_engine_power_hp}hp`:""} · {fl(t.model_engine_type)}</div>
+            </div>)}
+          </div>
+        </>}
+        {step==="confirm"&&<>
+          <div style={{background:"#0f172a",borderRadius:10,padding:14,marginBottom:14}}>
+            <div style={{fontSize:18,fontWeight:700}}>{selMake?.make_display} {selModel?.model_name}</div>
+            {selTrim&&<div style={{fontSize:13,color:"#94a3b8",marginTop:4}}>{selTrim.model_year} · {selTrim.model_trim||""}</div>}
+          </div>
+          <div style={{fontSize:12,color:"#94a3b8",marginBottom:4}}>⛽ Carburante *</div>
+          <select value={fuel} onChange={e=>setFuel(e.target.value)} style={{...INP,marginBottom:10}}>
+            <option value="">— Seleziona —</option>
+            {FUEL_TYPES.map(f=><option key={f}>{f}</option>)}
+          </select>
+          <div style={{fontSize:12,color:"#94a3b8",marginBottom:4}}>Targa</div>
+          <input value={targa} onChange={e=>setTarga(e.target.value.toUpperCase())} placeholder="es. AB123CD" maxLength={8} style={{...INP,marginBottom:14}}/>
+          <button onClick={confirm} style={{width:"100%",background:"linear-gradient(135deg,#1e40af,#7c3aed)",color:"#fff",border:"none",borderRadius:12,padding:14,cursor:"pointer",fontSize:15,fontWeight:700}}>✅ Conferma veicolo</button>
+        </>}
+      </>)}
+    </Modal>
+  );
+}
+
+// ─── ImportModal ──────────────────────────────────────────────────────────────
+function ImportModal({onImport,onClose,existingVehicle,notify}){
+  const [stage,setStage]=useState("upload");
+  const [parsed,setParsed]=useState(null);
+  const [vRes,setVRes]=useState({});
+  const [importing,setImporting]=useState(false);
+  const [driveLoading,setDriveLoading]=useState(false);
+  const fileRef=useRef();
+
+  const handleParsed=text=>{setParsed(parseCSV(text));setStage("preview");};
+
+  const handleFile=e=>{
+    const f=e.target.files[0]; if(!f) return;
+    const r=new FileReader(); r.onload=ev=>handleParsed(ev.target.result); r.readAsText(f,"UTF-8");
+  };
+
+  const openDrive=()=>{
+    if(!window.gapi){notify("❌ Google API non caricata, riprova","error");return;}
+    setDriveLoading(true);
+    window.gapi.load("auth2",()=>{
+      window.gapi.auth.authorize({client_id:GDRIVE_CLIENT_ID,scope:GDRIVE_SCOPE,immediate:false},async authResult=>{
+        if(!authResult||authResult.error){notify("❌ Accesso Drive negato","error");setDriveLoading(false);return;}
+        window.gapi.load("picker",()=>{
+          setDriveLoading(false);
+          new window.google.picker.PickerBuilder()
+            .addView(new window.google.picker.DocsView().setMimeTypes("text/csv,text/plain,application/vnd.google-apps.spreadsheet"))
+            .setOAuthToken(authResult.access_token)
+            .setCallback(async data=>{
+              if(data.action!==window.google.picker.Action.PICKED) return;
+              const file=data.docs[0];
+              try{
+                const url=file.mimeType==="application/vnd.google-apps.spreadsheet"
+                  ?`https://www.googleapis.com/drive/v3/files/${file.id}/export?mimeType=text/csv`
+                  :`https://www.googleapis.com/drive/v3/files/${file.id}?alt=media`;
+                const res=await fetch(url,{headers:{Authorization:`Bearer ${authResult.access_token}`}});
+                handleParsed(await res.text());
+              }catch(e){notify("❌ Errore lettura Drive: "+e.message,"error");}
+            }).build().setVisible(true);
+        });
+      });
+    });
+  };
+
+  const doImport=async()=>{
+    setImporting(true);
+    await onImport(parsed.rows.map(r=>({...r,vehicle:vRes[r._vRaw]??r._vRaw})));
+    setImporting(false);
+  };
+
+  const uniqueVehicles=[...new Set((parsed?.rows||[]).map(r=>r._vRaw).filter(Boolean))];
+
+  return(
+    <Modal title="📥 Importa CSV" onClose={onClose}>
+      {stage==="upload"&&<>
+        {/* Guida struttura */}
+        <div style={{background:"#0f172a",borderRadius:12,padding:14,marginBottom:16}}>
+          <div style={{fontWeight:700,fontSize:13,marginBottom:10,color:"#f59e0b"}}>📋 Struttura CSV attesa</div>
+          {[
+            ["Separatore","virgola (,) o punto e virgola (;) o tab — rilevato automaticamente"],
+            ["Formato data","GG/MM/AAAA (es. 15/03/2023)"],
+            ["Formato ora","HH:MM (es. 08:30) — opzionale"],
+            ["Decimali","punto (1.879) o virgola (1,879) — entrambi accettati"],
+            ["Campi obbligatori","nessuno — i campi mancanti restano vuoti"],
+          ].map(([k,v],i)=><div key={i} style={{fontSize:12,marginBottom:5}}><span style={{color:"#e2e8f0",fontWeight:600}}>{k}:</span> <span style={{color:"#94a3b8"}}>{v}</span></div>)}
+          <div style={{fontSize:11,color:"#64748b",marginTop:8,marginBottom:4}}>Intestazione:</div>
+          <div style={{background:"#1e293b",borderRadius:8,padding:8,fontFamily:"monospace",fontSize:10,color:"#22d3ee",overflowX:"auto",whiteSpace:"nowrap"}}>data,ora,km attuali,km distanza percorsa,importo,prezzo €/litro,carburante,auto</div>
+          <div style={{fontSize:11,color:"#64748b",marginTop:6,marginBottom:4}}>Esempio:</div>
+          <div style={{background:"#1e293b",borderRadius:8,padding:8,fontFamily:"monospace",fontSize:10,color:"#94a3b8",overflowX:"auto",whiteSpace:"nowrap"}}>15/03/2023,08:30,45230,312,65.50,1.879,Benzina,Fiat Tipo Cross</div>
+        </div>
+        <input type="file" accept=".csv,.txt" onChange={handleFile} ref={fileRef} style={{display:"none"}}/>
+        <button onClick={()=>fileRef.current.click()} style={{width:"100%",background:"linear-gradient(135deg,#1e40af,#7c3aed)",color:"#fff",border:"none",borderRadius:12,padding:14,cursor:"pointer",fontSize:15,fontWeight:700,marginBottom:10}}>
+          📂 Scegli file dal dispositivo
+        </button>
+        <button onClick={openDrive} disabled={driveLoading} style={{width:"100%",background:driveLoading?"#334155":"linear-gradient(135deg,#16a34a,#15803d)",color:"#fff",border:"none",borderRadius:12,padding:14,cursor:driveLoading?"not-allowed":"pointer",fontSize:15,fontWeight:700,display:"flex",alignItems:"center",justifyContent:"center",gap:8}}>
+          <svg width="18" height="18" viewBox="0 0 87.3 78"><path d="M6.6 66.85l3.85 6.65c.8 1.4 1.95 2.5 3.3 3.3l13.75-23.8H0c0 1.55.4 3.1 1.2 4.5z" fill="#0066DA"/><path d="M43.65 25L29.9 1.2C28.55 2 27.4 3.1 26.6 4.5L1.2 49.05c-.8 1.4-1.2 2.95-1.2 4.5h27.5z" fill="#00AC47"/><path d="M73.55 76.8c1.35-.8 2.5-1.9 3.3-3.3l1.6-2.75 7.65-13.25c.8-1.4 1.2-2.95 1.2-4.5H59.8l5.85 11.5z" fill="#EA4335"/><path d="M43.65 25L57.4 1.2C56.05.4 54.5 0 52.9 0H34.4c-1.6 0-3.15.45-4.5 1.2z" fill="#00832D"/><path d="M59.8 53.55H27.5L13.75 77.35c1.35.8 2.9 1.2 4.5 1.2h50.8c1.6 0 3.15-.4 4.5-1.2z" fill="#2684FC"/><path d="M73.4 26.45l-12.65-21.9C59.95 3.1 58.8 2 57.45 1.2L43.7 25l16.15 28h27.45c0-1.55-.4-3.1-1.2-4.5z" fill="#FFBA00"/></svg>
+          {driveLoading?"⏳ Apertura Drive...":"Importa da Google Drive"}
+        </button>
+      </>}
+
+      {stage==="preview"&&parsed&&<>
+        <div style={{background:"#0f172a",borderRadius:10,padding:8,marginBottom:12,fontSize:12,color:"#64748b"}}>
+          Separatore rilevato: <code style={{color:"#f59e0b"}}>{parsed.sepName}</code>
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:14}}>
+          <div style={{background:"#14532d",borderRadius:10,padding:12,textAlign:"center"}}>
+            <div style={{fontSize:22,fontWeight:700,color:"#4ade80"}}>{parsed.rows.length}</div>
+            <div style={{fontSize:12,color:"#86efac"}}>✅ Righe importabili</div>
+          </div>
+          <div style={{background:parsed.warnings.length?"#422006":"#1e293b",borderRadius:10,padding:12,textAlign:"center"}}>
+            <div style={{fontSize:22,fontWeight:700,color:parsed.warnings.length?"#fb923c":"#64748b"}}>{parsed.warnings.length}</div>
+            <div style={{fontSize:12,color:parsed.warnings.length?"#fed7aa":"#64748b"}}>⚠️ Con avvisi</div>
+          </div>
+        </div>
+
+        {parsed.warnings.length>0&&<>
+          <div style={{fontWeight:700,fontSize:13,marginBottom:8,color:"#fb923c"}}>⚠️ Avvisi (righe importate con campi vuoti)</div>
+          <div style={{maxHeight:150,overflowY:"auto",marginBottom:12}}>
+            {parsed.warnings.map((e,i)=>(
+              <div key={i} style={{background:"#1c1008",borderRadius:8,padding:10,marginBottom:6,fontSize:12}}>
+                <div style={{color:"#fb923c",fontWeight:700}}>Riga {e.line}</div>
+                {e.warnings.map((w,j)=><div key={j} style={{color:"#fed7aa",marginTop:2}}>{w}</div>)}
+              </div>
+            ))}
+          </div>
+        </>}
+
+        {uniqueVehicles.length>0&&<>
+          <div style={{fontWeight:700,fontSize:13,marginBottom:8,color:"#f59e0b"}}>🚗 Verifica nomi veicoli</div>
+          {uniqueVehicles.map(raw=>(
+            <div key={raw} style={{background:"#0f172a",borderRadius:8,padding:10,marginBottom:8}}>
+              <div style={{fontSize:12,color:"#94a3b8",marginBottom:6}}>CSV: <strong style={{color:"#e2e8f0"}}>"{raw}"</strong></div>
+              <input value={vRes[raw]??raw} onChange={e=>setVRes(p=>({...p,[raw]:e.target.value}))} style={INP_SM}/>
+              {existingVehicle&&<button onClick={()=>setVRes(p=>({...p,[raw]:`${existingVehicle.brand} ${existingVehicle.model}`}))}
+                style={{marginTop:6,background:"#334155",color:"#e2e8f0",border:"none",borderRadius:6,padding:"4px 10px",cursor:"pointer",fontSize:11}}>
+                Usa veicolo attivo: {existingVehicle.brand} {existingVehicle.model}
+              </button>}
+            </div>
+          ))}
+        </>}
+
+        <div style={{display:"flex",gap:8,marginTop:8}}>
+          <button onClick={()=>setStage("upload")} style={{flex:1,background:"#334155",color:"#e2e8f0",border:"none",borderRadius:10,padding:12,cursor:"pointer",fontSize:13}}>← Indietro</button>
+          <button onClick={doImport} disabled={importing||!parsed.rows.length}
+            style={{flex:2,background:!parsed.rows.length?"#334155":"linear-gradient(135deg,#1e40af,#7c3aed)",color:"#fff",border:"none",borderRadius:10,padding:12,cursor:!parsed.rows.length?"not-allowed":"pointer",fontSize:14,fontWeight:700}}>
+            {importing?"⏳ Importazione...":`✅ Importa ${parsed.rows.length} righe`}
+          </button>
+        </div>
+      </>}
+    </Modal>
+  );
+}
+
+// ─── ExportModal ──────────────────────────────────────────────────────────────
+function ExportModal({refuels,onClose}){
+  const doExport=fmt=>{
+    const isIT=fmt==="excel_it";
+    const sep=isIT?";":",";
+    const n=v=>(v===null||v===undefined)?"":v;
+    const dec=v=>isIT?n(v).toString().replace(".",","):n(v);
+    const header=["data","ora","km attuali","km distanza percorsa","importo","prezzo €/litro","carburante","auto"].join(sep);
+    const rows=refuels.map(r=>[fmtDate(r.datetime),fmtTime(r.datetime),dec(r.km),dec(r.kmDelta),dec(r.amount),dec(r.pricePerLiter),r.fuelType||"",`"${r.vehicle||""}"`].join(sep));
+    const bom=isIT?"\uFEFF":"";
+    const blob=new Blob([bom+[header,...rows].join("\n")],{type:"text/csv;charset=utf-8;"});
+    const a=document.createElement("a"); a.href=URL.createObjectURL(blob); a.download=`rifornimenti_${fmt}.csv`; a.click();
+    onClose();
+  };
+  return(
+    <Modal title="📤 Esporta CSV" onClose={onClose}>
+      <div style={{fontSize:13,color:"#94a3b8",marginBottom:16}}>Scegli il formato in base a dove aprirai il file:</div>
+      {[
+        {id:"standard",icon:"🌐",label:"Standard / Re-import app",desc:"Virgola (,) · Punto decimale (.) · Universale"},
+        {id:"excel_it",icon:"📗",label:"Excel italiano",desc:"Punto e virgola (;) · Virgola decimale (,) · BOM UTF-8"},
+        {id:"gfogli",  icon:"📊",label:"Google Fogli",desc:"Virgola (,) · Punto decimale (.) · Ottimale per Sheets"},
+      ].map(f=>(
+        <button key={f.id} onClick={()=>doExport(f.id)} style={{width:"100%",background:"#0f172a",border:"1px solid #334155",borderRadius:12,padding:14,cursor:"pointer",marginBottom:10,textAlign:"left",color:"#e2e8f0"}}>
+          <div style={{fontSize:15,fontWeight:700,marginBottom:4}}>{f.icon} {f.label}</div>
+          <div style={{fontSize:12,color:"#64748b"}}>{f.desc}</div>
+        </button>
+      ))}
+    </Modal>
+  );
+}
+
+// ─── StatsTab ─────────────────────────────────────────────────────────────────
+function StatsTab({refuels}){
+  const [view,setView]=useState("km_year"); const [selY,setSelY]=useState(null);
+  const years=useMemo(()=>[...new Set(refuels.map(r=>new Date(r.datetime||Date.now()).getFullYear()))].sort(),[refuels]);
+  const yr=selY||(years.length?years[years.length-1]:new Date().getFullYear());
+  const byYr=r=>new Date(r.datetime||Date.now()).getFullYear()===yr;
+
+  const kmByYear=useMemo(()=>{const m={};refuels.forEach(r=>{const y=new Date(r.datetime||Date.now()).getFullYear();if(!m[y])m[y]={min:Infinity,max:-Infinity};if(r.km){m[y].min=Math.min(m[y].min,r.km);m[y].max=Math.max(m[y].max,r.km);}});return Object.entries(m).map(([y,v])=>({label:y,value:v.max===-Infinity?0:v.max-(v.min===Infinity?0:v.min)})).sort((a,b)=>a.label-b.label);},[refuels]);
+  const kmByMonth=useMemo(()=>{const m={};refuels.filter(byYr).forEach(r=>{if(r.kmDelta){const mo=new Date(r.datetime).getMonth();m[mo]=(m[mo]||0)+r.kmDelta;}});return MONTHS_IT.map((l,i)=>({label:l,value:m[i]||0}));},[refuels,yr]);
+  const priceMonth=useMemo(()=>{const m={};refuels.filter(byYr).forEach(r=>{if(r.pricePerLiter){const mo=new Date(r.datetime).getMonth();(m[mo]=m[mo]||[]).push(r.pricePerLiter);}});return MONTHS_IT.map((l,i)=>({label:l,value:m[i]?m[i].reduce((s,v)=>s+v,0)/m[i].length:0}));},[refuels,yr]);
+  const priceYear=useMemo(()=>{const m={};refuels.forEach(r=>{if(r.pricePerLiter){const y=new Date(r.datetime||Date.now()).getFullYear();(m[y]=m[y]||[]).push(r.pricePerLiter);}});return Object.entries(m).map(([y,a])=>({label:y,value:a.reduce((s,v)=>s+v,0)/a.length})).sort((a,b)=>a.label-b.label);},[refuels]);
+  const spesaMonth=useMemo(()=>{const m={};refuels.filter(byYr).forEach(r=>{if(r.amount){const mo=new Date(r.datetime).getMonth();m[mo]=(m[mo]||0)+r.amount;}});return MONTHS_IT.map((l,i)=>({label:l,value:m[i]||0}));},[refuels,yr]);
+  const spesaYear=useMemo(()=>{const m={};refuels.forEach(r=>{if(r.amount){const y=new Date(r.datetime||Date.now()).getFullYear();m[y]=(m[y]||0)+r.amount;}});return Object.entries(m).map(([y,v])=>({label:y,value:v})).sort((a,b)=>a.label-b.label);},[refuels]);
+  const consumoMonth=useMemo(()=>{const m={};refuels.filter(byYr).forEach(r=>{if(r.amount&&r.kmDelta&&r.pricePerLiter){const mo=new Date(r.datetime).getMonth();(m[mo]=m[mo]||[]).push(r.amount/r.pricePerLiter/r.kmDelta*100);}});return MONTHS_IT.map((l,i)=>({label:l,value:m[i]?m[i].reduce((s,v)=>s+v,0)/m[i].length:0}));},[refuels,yr]);
+
+  const VIEWS=[{id:"km_year",l:"🛣️ Km/Anno"},{id:"km_month",l:"📅 Km/Mese"},{id:"price_month",l:"💶 Prezzo/Mese"},{id:"price_year",l:"📈 Prezzo/Anno"},{id:"spesa_month",l:"🧾 Spesa/Mese"},{id:"spesa_year",l:"🧾 Spesa/Anno"},{id:"consumo",l:"⚡ Consumo"}];
+  const needsYear=["km_month","price_month","spesa_month","consumo"].includes(view);
+
+  if(!refuels.length) return <div style={{textAlign:"center",color:"#64748b",padding:40}}><div style={{fontSize:48}}>📊</div><div style={{marginTop:12}}>Aggiungi rifornimenti per le statistiche!</div></div>;
+
+  return(<div>
+    <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:12}}>
+      {VIEWS.map(v=><button key={v.id} onClick={()=>setView(v.id)} style={{background:view===v.id?"#7c3aed":"#1e293b",color:"#e2e8f0",border:"none",borderRadius:20,padding:"6px 12px",cursor:"pointer",fontSize:12,fontWeight:view===v.id?700:400}}>{v.l}</button>)}
+    </div>
+    {needsYear&&<div style={{display:"flex",gap:6,marginBottom:12,flexWrap:"wrap"}}>{years.map(y=><button key={y} onClick={()=>setSelY(y)} style={{background:yr===y?"#f59e0b":"#1e293b",color:yr===y?"#000":"#e2e8f0",border:"none",borderRadius:20,padding:"5px 14px",cursor:"pointer",fontSize:13,fontWeight:700}}>{y}</button>)}</div>}
+    {view==="km_year"&&<StatCard title="🛣️ Km/anno" sub="Distanza totale per anno"><BarChart data={kmByYear} color="#3b82f6" fmt={v=>v>0?`${(v/1000).toFixed(1)}k`:"0"}/><StatTable rows={kmByYear.map(d=>({Anno:d.label,"Km":d.value>0?`${d.value.toLocaleString("it-IT")} km`:"N/D"}))}/></StatCard>}
+    {view==="km_month"&&<StatCard title={`📅 Km/mese — ${yr}`} sub="Distanza mensile"><BarChart data={kmByMonth} color="#3b82f6" fmt={v=>v>0?`${v}`:"–"}/><StatTable rows={kmByMonth.filter(d=>d.value>0).map(d=>({Mese:d.label,"Km":`${d.value.toLocaleString("it-IT")} km`}))}/></StatCard>}
+    {view==="price_month"&&<StatCard title={`💶 Prezzo/mese — ${yr}`} sub="Prezzo medio al litro"><LineChart data={priceMonth} color="#f59e0b"/><StatTable rows={priceMonth.filter(d=>d.value>0).map(d=>({Mese:d.label,"€/L":`€ ${d.value.toFixed(3)}`}))}/></StatCard>}
+    {view==="price_year"&&<StatCard title="📈 Prezzo/anno" sub="Prezzo medio al litro per anno"><LineChart data={priceYear} color="#f59e0b"/><StatTable rows={priceYear.map(d=>({Anno:d.label,"€/L":`€ ${d.value.toFixed(3)}`}))}/></StatCard>}
+    {view==="spesa_month"&&<StatCard title={`🧾 Spesa/mese — ${yr}`} sub="Importo mensile"><BarChart data={spesaMonth} color="#ec4899" fmt={v=>v>0?`€${v.toFixed(0)}`:"–"}/><StatTable rows={spesaMonth.filter(d=>d.value>0).map(d=>({Mese:d.label,Spesa:`€ ${d.value.toFixed(2)}`}))}/></StatCard>}
+    {view==="spesa_year"&&<StatCard title="🧾 Spesa/anno" sub="Spesa totale per anno"><BarChart data={spesaYear} color="#ec4899" fmt={v=>`€${v.toFixed(0)}`}/><StatTable rows={spesaYear.map(d=>({Anno:d.label,Spesa:`€ ${d.value.toFixed(2)}`}))}/></StatCard>}
+    {view==="consumo"&&<StatCard title={`⚡ Consumo/mese — ${yr}`} sub="L/100km per mese"><LineChart data={consumoMonth} color="#22d3ee"/><StatTable rows={consumoMonth.filter(d=>d.value>0).map(d=>({Mese:d.label,"L/100km":`${d.value.toFixed(2)} L`}))}/></StatCard>}
+  </div>);
+}
+
+// ─── App ──────────────────────────────────────────────────────────────────────
+function App(){
+  const fs=useFirestore();
+  const [refuels,loadingR]=useRefuels(fs);
+  const [vehicle,setVehicle]=useVehicle(fs);
+  const [tab,setTab]=useState("dashboard");
+  const [showAdd,setShowAdd]=useState(false);
+  const [showVehicle,setShowVehicle]=useState(false);
+  const [showImport,setShowImport]=useState(false);
+  const [showExport,setShowExport]=useState(false);
+  const [notif,setNotif]=useState(null);
+
+  const notify=(msg,type="success")=>{setNotif({msg,type});setTimeout(()=>setNotif(null),3500);};
+
+  const handleSave=async r=>{try{await fbSave(fs,r);notify("✅ Salvato!");}catch(e){notify("❌ Errore: "+e.message,"error");}};
+  const handleDelete=async id=>{if(!confirm("Eliminare?"))return;try{await fbDelete(fs,id);notify("Eliminato","error");}catch(e){notify("❌ "+e.message,"error");}};
+  const handleImport=async rows=>{try{for(const r of rows)await fbSave(fs,r);notify(`✅ ${rows.length} righe importate!`);setShowImport(false);}catch(e){notify("❌ "+e.message,"error");}};
+
+  const tot=refuels.reduce((s,r)=>s+(r.amount||0),0);
+  const totKm=refuels.length>1?refuels[refuels.length-1].km-refuels[0].km:0;
+  const avgP=refuels.length?refuels.reduce((s,r)=>s+(r.pricePerLiter||0),0)/refuels.length:0;
+  const vc=refuels.filter(r=>r.amount&&r.kmDelta&&r.pricePerLiter);
+  const avgC=vc.length?vc.reduce((s,r)=>s+r.amount/r.pricePerLiter/r.kmDelta*100,0)/vc.length:0;
+  const lastKm=refuels.length?refuels[refuels.length-1].km:0;
+
+  const TABS=[{id:"dashboard",e:"📊",t:"Dashboard"},{id:"stats",e:"📈",t:"Statistiche"},{id:"history",e:"📋",t:"Storico"},{id:"vehicle",e:"🚗",t:"Veicolo"}];
+
+  if(!fs||loadingR) return(
+    <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",height:"100vh",gap:16}}>
+      <div style={{fontSize:48}}>⛽</div>
+      <div style={{color:"#64748b"}}>{!fs?"Connessione Firebase...":"Caricamento dati..."}</div>
+    </div>
+  );
+
+  return(<div style={{fontFamily:"system-ui,sans-serif",background:"#0f172a",minHeight:"100vh",color:"#e2e8f0",maxWidth:480,margin:"0 auto"}}>
+    {/* Header */}
+    <div style={{background:"linear-gradient(135deg,#1e40af,#7c3aed)",padding:"20px 16px 0",position:"sticky",top:0,zIndex:10}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",paddingBottom:12}}>
+        <div>
+          <div style={{fontSize:20,fontWeight:700}}>⛽ BenzinApp</div>
+          <div style={{fontSize:12,opacity:.75,marginTop:2}}>{vehicle?`${vehicle.brand} ${vehicle.model}${vehicle.targa?` · ${vehicle.targa}`:""}` : "Nessun veicolo"}</div>
+        </div>
+        <button onClick={()=>setShowAdd(true)} style={{background:"#f59e0b",color:"#000",border:"none",borderRadius:12,padding:"10px 16px",fontWeight:700,cursor:"pointer",fontSize:14}}>+ Rifornimento</button>
+      </div>
+      <div style={{display:"flex"}}>
+        {TABS.map(t=><button key={t.id} onClick={()=>setTab(t.id)} style={{flex:1,background:"transparent",color:"#fff",border:"none",borderBottom:tab===t.id?"3px solid #f59e0b":"3px solid transparent",padding:"8px 2px",cursor:"pointer",fontSize:11,fontWeight:tab===t.id?700:400}}>{t.e} {t.t}</button>)}
+      </div>
+    </div>
+
+    {notif&&<div style={{position:"fixed",top:16,left:"50%",transform:"translateX(-50%)",background:notif.type==="error"?"#dc2626":"#16a34a",color:"#fff",borderRadius:10,padding:"10px 20px",zIndex:999,fontSize:14,fontWeight:600,boxShadow:"0 4px 20px rgba(0,0,0,0.4)",whiteSpace:"nowrap"}}>{notif.msg}</div>}
+
+    <div style={{padding:16}}>
+      {/* DASHBOARD */}
+      {tab==="dashboard"&&<>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:16}}>
+          {[{l:"Totale speso",v:`€ ${tot.toFixed(2)}`,i:"💶"},{l:"Km percorsi",v:`${(totKm||0).toFixed(0)} km`,i:"🛣️"},{l:"Prezzo medio",v:`€ ${avgP.toFixed(3)}/L`,i:"📈"},{l:"Consumo medio",v:avgC>0?`${avgC.toFixed(1)} L/100km`:"N/D",i:"⚡"}].map((s,i)=>(
+            <div key={i} style={{background:"#1e293b",borderRadius:14,padding:16}}>
+              <div style={{fontSize:22}}>{s.i}</div>
+              <div style={{fontSize:18,fontWeight:700,marginTop:6}}>{s.v}</div>
+              <div style={{fontSize:11,color:"#94a3b8",marginTop:2}}>{s.l}</div>
+            </div>
+          ))}
+        </div>
+        <div style={{background:"#1e293b",borderRadius:14,padding:16,marginBottom:16}}>
+          <div style={{fontWeight:700,marginBottom:10,fontSize:14}}>📅 Ultimi rifornimenti</div>
+          {!refuels.length&&<div style={{color:"#64748b",fontSize:13}}>Nessun rifornimento. Aggiungine uno!</div>}
+          {[...refuels].slice(-5).reverse().map(r=>(
+            <div key={r.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 0",borderBottom:"1px solid #334155"}}>
+              <div>
+                <div style={{fontSize:13,fontWeight:600}}>{fmtDate(r.datetime)} · {r.fuelType}</div>
+                <div style={{fontSize:11,color:"#94a3b8"}}>{r.kmDelta>0?`+${r.kmDelta} km`:""} {r.vehicle?`· ${r.vehicle}`:""}</div>
+              </div>
+              <div style={{textAlign:"right"}}>
+                <div style={{color:"#f59e0b",fontWeight:700}}>€ {(r.amount||0).toFixed(2)}</div>
+                <div style={{fontSize:11,color:"#94a3b8"}}>€ {(r.pricePerLiter||0).toFixed(3)}/L</div>
+              </div>
+            </div>
+          ))}
+        </div>
+        <div style={{display:"flex",gap:8}}>
+          <button onClick={()=>setShowImport(true)} style={{flex:1,background:"#334155",color:"#e2e8f0",border:"none",borderRadius:10,padding:12,cursor:"pointer",fontSize:13,fontWeight:600}}>📥 Importa CSV</button>
+          <button onClick={()=>setShowExport(true)} style={{flex:1,background:"#334155",color:"#e2e8f0",border:"none",borderRadius:10,padding:12,cursor:"pointer",fontSize:13,fontWeight:600}}>📤 Esporta CSV</button>
+        </div>
+        <div style={{marginTop:8,fontSize:11,color:"#475569",textAlign:"center"}}>☁️ Sincronizzato su Firebase</div>
+      </>}
+
+      {/* STATISTICHE */}
+      {tab==="stats"&&<StatsTab refuels={refuels}/>}
+
+      {/* STORICO */}
+      {tab==="history"&&<>
+        <div style={{fontWeight:700,marginBottom:12}}>📋 Storico ({refuels.length})</div>
+        {!refuels.length&&<div style={{color:"#64748b",fontSize:13}}>Nessun rifornimento.</div>}
+        {[...refuels].reverse().map(r=>(
+          <div key={r.id} style={{background:"#1e293b",borderRadius:12,padding:14,marginBottom:10}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+              <div>
+                <div style={{fontWeight:700,fontSize:15}}>{fmtDate(r.datetime)} {fmtTime(r.datetime)}</div>
+                <div style={{fontSize:12,color:"#94a3b8",marginTop:2}}>{r.fuelType}{r.vehicle?` · ${r.vehicle}`:""}</div>
+              </div>
+              <button onClick={()=>handleDelete(r.id)} style={{background:"transparent",border:"none",color:"#ef4444",cursor:"pointer",fontSize:18,padding:0}}>🗑️</button>
+            </div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginTop:10}}>
+              {[{l:"Km attuali",v:r.km?`${r.km.toLocaleString("it-IT")} km`:"-"},{l:"Percorsi",v:r.kmDelta>0?`+${r.kmDelta} km`:"-"},{l:"Importo",v:`€ ${(r.amount||0).toFixed(2)}`}].map((x,i)=>(
+                <div key={i} style={{background:"#0f172a",borderRadius:8,padding:8,textAlign:"center"}}>
+                  <div style={{fontSize:13,fontWeight:700,color:"#f59e0b"}}>{x.v}</div>
+                  <div style={{fontSize:10,color:"#64748b",marginTop:2}}>{x.l}</div>
+                </div>
+              ))}
+            </div>
+            <div style={{marginTop:8,fontSize:12,color:"#94a3b8"}}>€ {(r.pricePerLiter||0).toFixed(3)}/litro</div>
+          </div>
+        ))}
+      </>}
+
+      {/* VEICOLO */}
+      {tab==="vehicle"&&<>
+        <div style={{fontWeight:700,marginBottom:12}}>🚗 Il mio Veicolo</div>
+        {vehicle?(
+          <div style={{background:"#1e293b",borderRadius:14,padding:20,marginBottom:16}}>
+            <div style={{fontSize:22,marginBottom:8}}>🚘</div>
+            <div style={{fontSize:20,fontWeight:700}}>{vehicle.brand} {vehicle.model}</div>
+            <div style={{color:"#94a3b8",marginTop:4}}>{vehicle.year?`${vehicle.year} · `:""}{vehicle.fuel}{vehicle.targa?` · ${vehicle.targa}`:""}</div>
+            <div style={{marginTop:8,fontSize:12,color:"#475569"}}>☁️ Sincronizzato su tutti i dispositivi</div>
+            <button onClick={async()=>{await setVehicle(null);notify("Veicolo rimosso","error");}} style={{marginTop:14,background:"#dc2626",color:"#fff",border:"none",borderRadius:8,padding:"8px 16px",cursor:"pointer",fontSize:13}}>Rimuovi veicolo</button>
+          </div>
+        ):<div style={{background:"#1e293b",borderRadius:14,padding:20,marginBottom:16,color:"#64748b"}}>Nessun veicolo selezionato.</div>}
+        <button onClick={()=>setShowVehicle(true)} style={{width:"100%",background:"linear-gradient(135deg,#1e40af,#7c3aed)",color:"#fff",border:"none",borderRadius:12,padding:14,cursor:"pointer",fontSize:15,fontWeight:700}}>
+          🔍 Seleziona veicolo
+        </button>
+      </>}
+    </div>
+
+    {showAdd&&<AddRefuelModal vehicle={vehicle} lastKm={lastKm} onSave={async r=>{await handleSave(r);setShowAdd(false);}} onClose={()=>setShowAdd(false)}/>}
+    {showVehicle&&<VehicleModal onSelect={async v=>{await setVehicle(v);notify(`🚗 ${v.brand} ${v.model}`);setShowVehicle(false);}} onClose={()=>setShowVehicle(false)}/>}
+    {showImport&&<ImportModal onImport={handleImport} onClose={()=>setShowImport(false)} existingVehicle={vehicle} notify={notify}/>}
+    {showExport&&<ExportModal refuels={refuels} onClose={()=>setShowExport(false)}/>}
+  </div>);
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
