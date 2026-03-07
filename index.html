@@ -11,8 +11,7 @@
   <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
     import { getFirestore, collection, doc, setDoc, deleteDoc, onSnapshot, query, orderBy } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
-
-    const firebaseConfig = {
+    const cfg = {
       apiKey: "AIzaSyD9oVZP13hKQzCrp7rb0LOSU2VFLPR-igU",
       authDomain: "benzinapp-f4763.firebaseapp.com",
       projectId: "benzinapp-f4763",
@@ -20,18 +19,15 @@
       messagingSenderId: "186081684364",
       appId: "1:186081684364:web:ae67bd1b73540a275744a9"
     };
-    const app = initializeApp(firebaseConfig);
-    const db = getFirestore(app);
-
-    window.__firestore = {
-      db,
-      collection, doc, setDoc, deleteDoc, onSnapshot, query, orderBy
-    };
-    window.dispatchEvent(new Event("firebase-ready"));
+    const app = initializeApp(cfg);
+    const db  = getFirestore(app);
+    window.__fb = { db, collection, doc, setDoc, deleteDoc, onSnapshot, query, orderBy };
+    window.dispatchEvent(new Event("fb-ready"));
   </script>
   <style>
     *{box-sizing:border-box;margin:0;padding:0}
-    body{background:#0f172a;color:#e2e8f0;font-family:system-ui,sans-serif}
+    body{background:#0f172a;color:#e2e8f0;font-family:system-ui,sans-serif;-webkit-tap-highlight-color:transparent}
+    input,select,button{font-family:inherit}
     input,select{outline:none}
     ::-webkit-scrollbar{width:4px}
     ::-webkit-scrollbar-track{background:#1e293b}
@@ -43,255 +39,193 @@
 <script type="text/babel">
 const { useState, useEffect, useRef, useMemo } = React;
 
-const FUEL_TYPES = ["Benzina","Diesel","GPL","Metano","Elettrico","Ibrido"];
-const MONTHS_IT = ["Gen","Feb","Mar","Apr","Mag","Giu","Lug","Ago","Set","Ott","Nov","Dic"];
-const FUEL_MAP = {G:"Benzina",D:"Diesel",E:"Elettrico",H:"Ibrido",B:"Ibrido"};
-const fuelLabel = f => FUEL_MAP[f]||f||"N/D";
-const formatDate = d => d ? new Date(d).toLocaleDateString("it-IT") : "";
-const formatTime = d => d ? new Date(d).toLocaleTimeString("it-IT",{hour:"2-digit",minute:"2-digit"}) : "";
-const nowISO = () => new Date().toISOString();
+// ─── Costanti ────────────────────────────────────────────────────────────────
+const FUEL_TYPES  = ["Benzina","Diesel","GPL","Metano","Elettrico","Ibrido"];
+const MONTHS_IT   = ["Gen","Feb","Mar","Apr","Mag","Giu","Lug","Ago","Set","Ott","Nov","Dic"];
+const GDRIVE_CLIENT_ID = "186081684364-o5vsskphmdp9t9j3eenbo6sns6m6j56c.apps.googleusercontent.com";
+const GDRIVE_SCOPE     = "https://www.googleapis.com/auth/drive.readonly";
 
-// ── Fuzzy match veicoli ──────────────────────────────────────────────────────
-function fuzzyScore(a, b) {
-  a = a.toLowerCase(); b = b.toLowerCase();
-  if (a === b) return 1;
-  if (b.includes(a) || a.includes(b)) return 0.8;
-  const aW = a.split(/\s+/), bW = b.split(/\s+/);
-  const matches = aW.filter(w => bW.some(bw => bw.includes(w) || w.includes(bw)));
-  return matches.length / Math.max(aW.length, bW.length);
-}
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+const fmtDate = d => d ? new Date(d).toLocaleDateString("it-IT") : "";
+const fmtTime = d => d ? new Date(d).toLocaleTimeString("it-IT",{hour:"2-digit",minute:"2-digit"}) : "";
+const nowISO  = () => new Date().toISOString();
 
-// ── CSV Parser ───────────────────────────────────────────────────────────────
-// Converte un valore stringa numerico in float, gestendo virgola e punto decimale
 function parseNum(raw) {
   if (!raw || !raw.trim()) return null;
-  // Rimuovi spazi, simboli valuta, caratteri non numerici tranne ,.+-
   let s = raw.trim().replace(/[€$£\s]/g,"");
-  // Caso europeo: 1.234,56 → 1234.56
   if (/^\d{1,3}(\.\d{3})+(,\d+)?$/.test(s)) s = s.replace(/\./g,"").replace(",",".");
-  // Caso con solo virgola decimale: 1,879 o 65,50
   else if (/^\d+(,\d+)$/.test(s)) s = s.replace(",",".");
-  // Già ok con punto decimale
   const n = parseFloat(s);
   return isNaN(n) ? null : n;
 }
 
-// Rileva separatore di colonna dal CSV
-function detectSeparator(line) {
-  const sc = (line.match(/;/g)||[]).length;
-  const tc = (line.match(/\t/g)||[]).length;
-  const cc = (line.match(/,/g)||[]).length;
-  if (tc >= sc && tc >= cc) return "\t";
-  if (sc > cc) return ";";
-  return ",";
+function detectSep(line) {
+  const t=(line.match(/\t/g)||[]).length, sc=(line.match(/;/g)||[]).length, cc=(line.match(/,/g)||[]).length;
+  if(t>=sc&&t>=cc) return "\t";
+  return sc>cc ? ";" : ",";
 }
 
-// Splitta una riga CSV rispettando i campi tra virgolette
-function splitCSVLine(line, sep) {
-  const result = [];
-  let cur = "", inQ = false;
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i];
-    if (ch === '"') { inQ = !inQ; continue; }
-    if (ch === sep && !inQ) { result.push(cur.trim()); cur = ""; continue; }
-    cur += ch;
+function splitLine(line, sep) {
+  const res=[]; let cur="", inQ=false;
+  for(let i=0;i<line.length;i++){
+    const c=line[i];
+    if(c==='"'){inQ=!inQ;continue;}
+    if(c===sep&&!inQ){res.push(cur.trim());cur="";continue;}
+    cur+=c;
   }
-  result.push(cur.trim());
-  return result;
+  res.push(cur.trim());
+  return res;
 }
 
 function parseCSV(text) {
-  // Normalizza fine riga
   text = text.replace(/\r\n/g,"\n").replace(/\r/g,"\n");
-  const lines = text.trim().split("\n").filter(l => l.trim());
-  if (lines.length < 2) return { rows:[], warnings:[{line:1, warnings:["File vuoto o con una sola riga"]}], separator:"," };
+  const lines = text.trim().split("\n").filter(l=>l.trim());
+  if(lines.length<2) return {rows:[],warnings:[{line:1,warnings:["File vuoto o con una sola riga"]}],sepName:"–"};
+  const sep = detectSep(lines[0]);
+  const sepName = sep==="\t"?"tab (Excel)":sep===";"?"punto e virgola (;)":"virgola (,)";
+  const header = splitLine(lines[0],sep).map(h=>h.toLowerCase().replace(/['"]/g,"").trim());
+  const rows=[], warnings=[];
 
-  const sep = detectSeparator(lines[0]);
-  const sepName = sep==="\t" ? "tab (Excel)" : sep===";" ? "punto e virgola (;)" : "virgola (,)";
-  const header = splitCSVLine(lines[0], sep).map(h => h.toLowerCase().replace(/['"]/g,"").trim());
+  for(let i=1;i<lines.length;i++){
+    if(!lines[i].trim()) continue;
+    const cols = splitLine(lines[i],sep);
+    const o={}; header.forEach((h,idx)=>o[h]=(cols[idx]||"").trim());
+    const warn=[];
 
-  const rows = [], warnings = [];
-
-  for (let i = 1; i < lines.length; i++) {
-    const raw = lines[i];
-    if (!raw.trim()) continue;
-    const cols = splitCSVLine(raw, sep);
-    const obj = {}; header.forEach((h,idx) => obj[h] = (cols[idx]||"").trim());
-
-    const rowWarnings = [];
-
-    // Data
-    const dateStr = obj["data"]||obj["date"]||"";
-    const timeStr = obj["ora"]||obj["time"]||"";
-    let dt = null;
-    if (dateStr) {
-      try {
-        // Supporta GG/MM/AAAA, GG-MM-AAAA, AAAA-MM-GG
+    const dateStr = o["data"]||o["date"]||"";
+    const timeStr = o["ora"]||o["time"]||"";
+    let dt=null;
+    if(dateStr){
+      try{
         let d,m,y;
-        if (/\d{4}-\d{2}-\d{2}/.test(dateStr)) { [y,m,d]=dateStr.split("-"); }
-        else { const parts=dateStr.split(/[\/\-]/); [d,m,y]=parts; }
-        const timepart = timeStr||"00:00";
-        const candidate = new Date(`${y}-${m.padStart(2,"0")}-${d.padStart(2,"0")}T${timepart.slice(0,5)}:00`);
-        if (isNaN(candidate)) throw new Error();
-        dt = candidate.toISOString();
-      } catch { rowWarnings.push(`⚠️ data non riconosciuta: "${dateStr}" — lasciata vuota`); }
+        if(/\d{4}-\d{2}-\d{2}/.test(dateStr)){[y,m,d]=dateStr.split("-");}
+        else{[d,m,y]=dateStr.split(/[\/\-]/);}
+        const tp=timeStr?timeStr.slice(0,5):"00:00";
+        const c=new Date(`${y}-${m.padStart(2,"0")}-${d.padStart(2,"0")}T${tp}:00`);
+        if(isNaN(c)) throw 0;
+        dt=c.toISOString();
+      }catch{warn.push(`⚠️ data non riconosciuta: "${dateStr}"`);}
     }
 
-    const kmRaw    = obj["km attuali"]||obj["km"]||"";
-    const amtRaw   = obj["importo"]||"";
-    const priceRaw = obj["prezzo €/litro"]||obj["prezzo €/l"]||obj["prezzo/litro"]||obj["prezzo"]||"";
-    const deltaRaw = obj["km distanza percorsa"]||obj["kmdistanza percorsa"]||obj["distanza"]||"";
+    const kmRaw    = o["km attuali"]||o["km"]||"";
+    const amtRaw   = o["importo"]||"";
+    const priceRaw = o["prezzo €/litro"]||o["prezzo €/l"]||o["prezzo/litro"]||o["prezzo"]||"";
+    const deltaRaw = o["km distanza percorsa"]||o["kmdistanza percorsa"]||o["distanza"]||"";
 
     const km    = parseNum(kmRaw);
     const amount= parseNum(amtRaw);
     const price = parseNum(priceRaw);
     const kmDelta=parseNum(deltaRaw);
 
-    if (kmRaw    && km    === null) rowWarnings.push(`⚠️ km non validi: "${kmRaw}" — lasciati vuoti`);
-    if (amtRaw   && amount=== null) rowWarnings.push(`⚠️ importo non valido: "${amtRaw}" — lasciato vuoto`);
-    if (priceRaw && price === null) rowWarnings.push(`⚠️ prezzo non valido: "${priceRaw}" — lasciato vuoto`);
+    if(kmRaw&&km===null)    warn.push(`⚠️ km non validi: "${kmRaw}"`);
+    if(amtRaw&&amount===null) warn.push(`⚠️ importo non valido: "${amtRaw}"`);
+    if(priceRaw&&price===null) warn.push(`⚠️ prezzo non valido: "${priceRaw}"`);
 
-    const fuelType   = obj["carburante"]||obj["fuel"]||"Benzina";
-    const vehicleRaw = obj["auto"]||obj["veicolo"]||"";
+    const vRaw = o["auto"]||o["veicolo"]||"";
+    const id   = btoa([dateStr,kmRaw,amtRaw,priceRaw,i].join("|")).replace(/[^a-zA-Z0-9]/g,"").slice(0,28);
 
-    const row = {
-      id: btoa([dateStr||"", kmRaw||"", amtRaw||"", priceRaw||"", i].join("|")).replace(/[^a-zA-Z0-9]/g,"").slice(0,28),
-      datetime: dt,
-      fuelType,
-      km,
-      kmDelta,
-      amount,
-      pricePerLiter: price,
-      vehicle: vehicleRaw,
-      _vehicleRaw: vehicleRaw,
-    };
-
-    if (rowWarnings.length > 0) warnings.push({ line: i+1, warnings: rowWarnings });
-    rows.push(row);
+    rows.push({id,datetime:dt,fuelType:o["carburante"]||o["fuel"]||"Benzina",km,kmDelta,amount,pricePerLiter:price,vehicle:vRaw,_vRaw:vRaw});
+    if(warn.length) warnings.push({line:i+1,warnings:warn});
   }
 
-  // Ricalcola kmDelta mancanti
-  for (let i = 1; i < rows.length; i++) {
-    if (!rows[i].kmDelta && rows[i].km && rows[i-1].km) {
-      const delta = rows[i].km - rows[i-1].km;
-      if (delta > 0) rows[i].kmDelta = delta;
+  // ricalcola kmDelta mancanti
+  for(let i=1;i<rows.length;i++){
+    if(!rows[i].kmDelta&&rows[i].km&&rows[i-1].km){
+      const d=rows[i].km-rows[i-1].km;
+      if(d>0) rows[i].kmDelta=d;
     }
   }
-
-  return { rows, warnings, separator: sep, separatorName: sepName };
+  return {rows,warnings,sepName};
 }
 
-// ── Normalizza nome veicolo ──────────────────────────────────────────────────
-function normalizeVehicleName(raw, knownVehicles) {
-  if (!raw) return { normalized: raw, suggestions: [] };
-  const scored = knownVehicles.map(v => {
-    const full = `${v.brand} ${v.model}`;
-    return { vehicle: v, full, score: fuzzyScore(raw, full) };
-  }).filter(x => x.score > 0.3).sort((a,b) => b.score - a.score);
-  if (scored.length && scored[0].score > 0.75) return { normalized: scored[0].full, suggestions: [] };
-  return { normalized: null, suggestions: scored.slice(0,4).map(x => x.vehicle) };
+// ─── Firebase hooks ───────────────────────────────────────────────────────────
+function useFirestore(){
+  const [ready,setReady]=useState(!!window.__fb);
+  useEffect(()=>{if(!window.__fb) window.addEventListener("fb-ready",()=>setReady(true),{once:true});},[]);
+  return ready?window.__fb:null;
 }
 
-// ── Firebase hooks ───────────────────────────────────────────────────────────
-function useFirestore() {
-  const [ready, setReady] = useState(!!window.__firestore);
-  useEffect(() => {
-    if (window.__firestore) return;
-    window.addEventListener("firebase-ready", () => setReady(true), {once:true});
-  }, []);
-  return ready ? window.__firestore : null;
+function useRefuels(fs){
+  const [data,setData]=useState([]); const [loading,setLoading]=useState(true);
+  useEffect(()=>{
+    if(!fs) return;
+    const {db,collection,query,orderBy,onSnapshot}=fs;
+    return onSnapshot(query(collection(db,"refuels"),orderBy("datetime","asc")),
+      snap=>{setData(snap.docs.map(d=>({id:d.id,...d.data()})));setLoading(false);},
+      ()=>setLoading(false));
+  },[fs]);
+  return [data,loading];
 }
 
-function useRefuels(fs) {
-  const [refuels, setRefuels] = useState([]);
-  const [loading, setLoading] = useState(true);
-  useEffect(() => {
-    if (!fs) return;
-    const {db, collection, query, orderBy, onSnapshot} = fs;
-    const q = query(collection(db,"refuels"), orderBy("datetime","asc"));
-    const unsub = onSnapshot(q, snap => {
-      setRefuels(snap.docs.map(d => ({id:d.id,...d.data()})));
-      setLoading(false);
-    }, err => { console.error(err); setLoading(false); });
-    return unsub;
-  }, [fs]);
-  return [refuels, loading];
-}
-
-async function saveRefuel(fs, r) {
-  const {db, doc, setDoc, collection} = fs;
-  await setDoc(doc(collection(db,"refuels"), r.id), r);
-}
-
-async function deleteRefuel(fs, id) {
-  const {db, doc, deleteDoc, collection} = fs;
-  await deleteDoc(doc(collection(db,"refuels"), id));
-}
-
-async function saveVehicle(fs, v) {
-  const {db, doc, setDoc, collection} = fs;
-  await setDoc(doc(collection(db,"settings"),"vehicle"), v||{empty:true});
-}
-
-function useVehicle(fs) {
-  const [vehicle, setVehicleState] = useState(null);
-  useEffect(() => {
-    if (!fs) return;
-    const {db, doc, collection, onSnapshot} = fs;
-    const unsub = onSnapshot(doc(collection(db,"settings"),"vehicle"), snap => {
-      const d = snap.data();
-      setVehicleState(d && !d.empty ? d : null);
+function useVehicle(fs){
+  const [v,setV]=useState(null);
+  useEffect(()=>{
+    if(!fs) return;
+    const {db,doc,collection,onSnapshot}=fs;
+    return onSnapshot(doc(collection(db,"settings"),"vehicle"),snap=>{
+      const d=snap.data(); setV(d&&!d.empty?d:null);
     });
-    return unsub;
-  }, [fs]);
-  const setVehicle = async (v) => { await saveVehicle(fs, v); };
-  return [vehicle, setVehicle];
+  },[fs]);
+  const save=async val=>{
+    const {db,doc,setDoc,collection}=fs;
+    await setDoc(doc(collection(db,"settings"),"vehicle"),val||{empty:true});
+  };
+  return [v,save];
 }
 
-// ── Charts ───────────────────────────────────────────────────────────────────
-function BarChart({data,color="#f59e0b",valueFormatter=v=>v,labelKey="label",valueKey="value"}) {
-  const max = Math.max(...data.map(d=>d[valueKey]||0),1);
-  return (
+async function fbSave(fs,r){
+  const {db,doc,setDoc,collection}=fs;
+  await setDoc(doc(collection(db,"refuels"),r.id),r);
+}
+async function fbDelete(fs,id){
+  const {db,doc,deleteDoc,collection}=fs;
+  await deleteDoc(doc(collection(db,"refuels"),id));
+}
+
+// ─── Mini charts ──────────────────────────────────────────────────────────────
+function BarChart({data,color="#f59e0b",fmt=v=>v,lk="label",vk="value"}){
+  const max=Math.max(...data.map(d=>d[vk]||0),1);
+  return(
     <div style={{display:"flex",alignItems:"flex-end",gap:4,height:100,marginTop:8}}>
       {data.map((d,i)=>(
         <div key={i} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:3}}>
-          <div style={{fontSize:9,color:"#94a3b8",textAlign:"center"}}>{valueFormatter(d[valueKey])}</div>
-          <div style={{width:"100%",background:color,borderRadius:"4px 4px 0 0",height:`${((d[valueKey]||0)/max)*72}px`,minHeight:d[valueKey]>0?3:0}}/>
-          <div style={{fontSize:9,color:"#64748b",textAlign:"center",whiteSpace:"nowrap"}}>{d[labelKey]}</div>
+          <div style={{fontSize:9,color:"#94a3b8",textAlign:"center"}}>{fmt(d[vk])}</div>
+          <div style={{width:"100%",background:color,borderRadius:"4px 4px 0 0",height:`${((d[vk]||0)/max)*72}px`,minHeight:d[vk]>0?3:0}}/>
+          <div style={{fontSize:9,color:"#64748b",textAlign:"center",whiteSpace:"nowrap"}}>{d[lk]}</div>
         </div>
       ))}
     </div>
   );
 }
 
-function LineChart({data,color="#22d3ee",labelKey="label",valueKey="value"}) {
-  const vals = data.map(d=>d[valueKey]||0);
-  const max = Math.max(...vals,1), min = Math.min(...vals.filter(v=>v>0),max);
-  const range = max-min||1, H=80, W=100;
-  const pts = data.map((d,i)=>{
-    const x = data.length<2?W/2:(i/(data.length-1))*W;
-    const y = d[valueKey]>0?H-((d[valueKey]-min)/range)*(H-10):H;
+function LineChart({data,color="#22d3ee",lk="label",vk="value"}){
+  const vals=data.map(d=>d[vk]||0);
+  const max=Math.max(...vals,1),min=Math.min(...vals.filter(v=>v>0),max),range=max-min||1;
+  const H=80,W=100;
+  const pts=data.map((d,i)=>{
+    const x=data.length<2?W/2:(i/(data.length-1))*W;
+    const y=d[vk]>0?H-((d[vk]-min)/range)*(H-10):H;
     return `${x},${y}`;
   }).join(" ");
-  return (
+  return(
     <div>
       <svg viewBox={`0 0 100 ${H}`} style={{width:"100%",height:90}} preserveAspectRatio="none">
         <polyline points={pts} fill="none" stroke={color} strokeWidth="2" strokeLinejoin="round"/>
         {data.map((d,i)=>{
           const x=data.length<2?W/2:(i/(data.length-1))*W;
-          const y=d[valueKey]>0?H-((d[valueKey]-min)/range)*(H-10):H;
-          return d[valueKey]>0?<circle key={i} cx={x} cy={y} r="2.5" fill={color}/>:null;
+          const y=d[vk]>0?H-((d[vk]-min)/range)*(H-10):H;
+          return d[vk]>0?<circle key={i} cx={x} cy={y} r="2.5" fill={color}/>:null;
         })}
       </svg>
       <div style={{display:"flex",justifyContent:"space-between",marginTop:4}}>
-        {data.map((d,i)=><div key={i} style={{fontSize:9,color:"#64748b",textAlign:"center",flex:1}}>{d[labelKey]}</div>)}
+        {data.map((d,i)=><div key={i} style={{fontSize:9,color:"#64748b",textAlign:"center",flex:1}}>{d[lk]}</div>)}
       </div>
     </div>
   );
 }
 
-function StatCard({title,sub,children}) {
-  return (
+function StatCard({title,sub,children}){
+  return(
     <div style={{background:"#1e293b",borderRadius:14,padding:16,marginBottom:16}}>
       <div style={{fontWeight:700,fontSize:15}}>{title}</div>
       <div style={{fontSize:12,color:"#64748b",marginBottom:8}}>{sub}</div>
@@ -300,10 +234,10 @@ function StatCard({title,sub,children}) {
   );
 }
 
-function StatTable({rows}) {
+function StatTable({rows}){
   if(!rows.length) return <div style={{fontSize:12,color:"#64748b",marginTop:8}}>Nessun dato.</div>;
-  const cols = Object.keys(rows[0]);
-  return (
+  const cols=Object.keys(rows[0]);
+  return(
     <div style={{marginTop:12,overflowX:"auto"}}>
       <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
         <thead><tr>{cols.map(c=><th key={c} style={{textAlign:"left",color:"#64748b",padding:"4px 6px",borderBottom:"1px solid #334155"}}>{c}</th>)}</tr></thead>
@@ -313,13 +247,14 @@ function StatTable({rows}) {
   );
 }
 
-function Modal({children,title,onClose}) {
-  return (
-    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.75)",zIndex:100,display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
+// ─── Modal wrapper ────────────────────────────────────────────────────────────
+function Modal({title,onClose,children}){
+  return(
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.75)",zIndex:200,display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
       <div style={{background:"#1e293b",borderRadius:"20px 20px 0 0",width:"100%",maxWidth:480,maxHeight:"92vh",overflowY:"auto",padding:20}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
           <div style={{fontWeight:700,fontSize:17}}>{title}</div>
-          <button onClick={onClose} style={{background:"#334155",color:"#e2e8f0",border:"none",borderRadius:8,width:32,height:32,cursor:"pointer",fontSize:18}}>×</button>
+          <button onClick={onClose} style={{background:"#334155",color:"#e2e8f0",border:"none",borderRadius:8,width:32,height:32,cursor:"pointer",fontSize:18,lineHeight:1}}>×</button>
         </div>
         {children}
       </div>
@@ -327,650 +262,10 @@ function Modal({children,title,onClose}) {
   );
 }
 
-// ── Add Refuel Modal ──────────────────────────────────────────────────────────
-function AddRefuelModal({vehicle,lastKm,onSave,onClose}) {
-  const [fuelType,setFuelType]=useState(vehicle?.fuel&&FUEL_TYPES.includes(vehicle.fuel)?vehicle.fuel:FUEL_TYPES[0]);
-  const [km,setKm]=useState("");
-  const [amount,setAmount]=useState("");
-  const [price,setPrice]=useState("");
-  const [saving,setSaving]=useState(false);
-  const kmDelta = km&&lastKm?Math.max(0,parseFloat(km)-lastKm):0;
-  const inp={background:"#0f172a",color:"#e2e8f0",border:"1px solid #334155",borderRadius:8,padding:"10px 12px",width:"100%",fontSize:15,boxSizing:"border-box"};
-  const save=async()=>{
-    if(!km||!amount||!price){alert("Compila tutti i campi obbligatori (*)");return;}
-    if(parseFloat(km)<(lastKm||0)){if(!confirm(`I km inseriti (${km}) sono minori degli ultimi registrati (${lastKm}). Continuare?`))return;}
-    setSaving(true);
-    await onSave({id:crypto.randomUUID(),datetime:nowISO(),fuelType,km:parseFloat(km),kmDelta,amount:parseFloat(amount),pricePerLiter:parseFloat(price),vehicle:vehicle?`${vehicle.brand} ${vehicle.model}`:""});
-    setSaving(false);
-  };
-  return (
-    <Modal onClose={onClose} title="⛽ Nuovo Rifornimento">
-      <div style={{marginBottom:12}}>
-        <div style={{fontSize:12,color:"#94a3b8",marginBottom:4}}>📅 Data e ora</div>
-        <div style={{background:"#0f172a",borderRadius:8,padding:"10px 12px",fontSize:14,color:"#64748b"}}>{new Date().toLocaleString("it-IT")} (automatico)</div>
-      </div>
-      {vehicle&&<div style={{marginBottom:12}}><div style={{fontSize:12,color:"#94a3b8",marginBottom:4}}>🚗 Veicolo</div><div style={{background:"#0f172a",borderRadius:8,padding:"10px 12px",fontSize:14,color:"#64748b"}}>{vehicle.brand} {vehicle.model}{vehicle.targa?` · ${vehicle.targa}`:""}</div></div>}
-      <div style={{marginBottom:12}}>
-        <div style={{fontSize:12,color:"#94a3b8",marginBottom:4}}>⛽ Tipo carburante</div>
-        <select value={fuelType} onChange={e=>setFuelType(e.target.value)} style={inp}>{FUEL_TYPES.map(f=><option key={f}>{f}</option>)}</select>
-      </div>
-      <div style={{marginBottom:12}}>
-        <div style={{fontSize:12,color:"#94a3b8",marginBottom:4}}>🛣️ Km attuali *</div>
-        <input type="number" value={km} onChange={e=>setKm(e.target.value)} placeholder={lastKm?`Ultimo: ${lastKm.toLocaleString("it-IT")} km`:"es. 45230"} style={inp}/>
-        {kmDelta>0&&<div style={{fontSize:12,color:"#22d3ee",marginTop:4}}>📍 Percorsi dall'ultimo: {kmDelta.toLocaleString("it-IT")} km</div>}
-      </div>
-      <div style={{marginBottom:12}}>
-        <div style={{fontSize:12,color:"#94a3b8",marginBottom:4}}>💶 Importo pagato (€) *</div>
-        <input type="number" step="0.01" value={amount} onChange={e=>setAmount(e.target.value)} placeholder="es. 65.50" style={inp}/>
-      </div>
-      <div style={{marginBottom:16}}>
-        <div style={{fontSize:12,color:"#94a3b8",marginBottom:4}}>📊 Prezzo al litro (€/L) *</div>
-        <input type="number" step="0.001" value={price} onChange={e=>setPrice(e.target.value)} placeholder="es. 1.879" style={inp}/>
-      </div>
-      {amount&&price&&<div style={{background:"#0f172a",borderRadius:8,padding:10,marginBottom:16,fontSize:13,color:"#94a3b8"}}>🔢 Litri stimati: <span style={{color:"#f59e0b",fontWeight:700}}>{(parseFloat(amount)/parseFloat(price)).toFixed(2)} L</span></div>}
-      <button onClick={save} disabled={saving} style={{width:"100%",background:saving?"#334155":"linear-gradient(135deg,#1e40af,#7c3aed)",color:"#fff",border:"none",borderRadius:12,padding:14,cursor:saving?"not-allowed":"pointer",fontSize:16,fontWeight:700}}>
-        {saving?"⏳ Salvataggio...":"💾 Salva Rifornimento"}
-      </button>
-    </Modal>
-  );
-}
+// ─── Input style ─────────────────────────────────────────────────────────────
+const INP={background:"#0f172a",color:"#e2e8f0",border:"1px solid #334155",borderRadius:8,padding:"10px 12px",width:"100%",fontSize:15,boxSizing:"border-box"};
+const INP_SM={...INP,fontSize:13,padding:"8px 12px"};
 
-// ── Vehicle Modal ─────────────────────────────────────────────────────────────
-function VehicleModal({onSelect,onClose}) {
-  const [makes,setMakes]=useState([]);
-  const [models,setModels]=useState([]);
-  const [trims,setTrims]=useState([]);
-  const [selMake,setSelMake]=useState(null);
-  const [selModel,setSelModel]=useState(null);
-  const [selTrim,setSelTrim]=useState(null);
-  const [targa,setTarga]=useState("");
-  const [carburante,setCarburante]=useState("");
-  const [loading,setLoading]=useState(false);
-  const [search,setSearch]=useState("");
-  const [step,setStep]=useState("make");
-  const [err,setErr]=useState(null);
-  // Manuale
-  const [manuale,setManuale]=useState(false);
-  const [manBrand,setManBrand]=useState("");
-  const [manModel,setManModel]=useState("");
-  const [manYear,setManYear]=useState("");
-
-  const PROXY="https://corsproxy.io/?url=";
-  const CQ="https://www.carqueryapi.com/api/0.3/";
-
-  const fetchMakes=async()=>{setLoading(true);setErr(null);try{const r=await fetch(`${PROXY}${encodeURIComponent(CQ+"?cmd=getMakes&sold_in_us=0")}`);const txt=await r.text();const json=JSON.parse(txt.replace(/^\(|\);?$/g,""));setMakes(json.Makes||[]);}catch{setErr("Impossibile caricare le marche — usa inserimento manuale.");}setLoading(false);};
-  const fetchModels=async(id)=>{setLoading(true);setErr(null);try{const r=await fetch(`${PROXY}${encodeURIComponent(CQ+`?cmd=getModels&make=${id}`)}`);const txt=await r.text();const json=JSON.parse(txt.replace(/^\(|\);?$/g,""));setModels(json.Models||[]);}catch{setErr("Impossibile caricare i modelli.");}setLoading(false);};
-  const fetchTrims=async(id,name)=>{setLoading(true);setErr(null);try{const r=await fetch(`${PROXY}${encodeURIComponent(CQ+`?cmd=getTrims&make=${id}&model=${encodeURIComponent(name)}`)}`);const txt=await r.text();const json=JSON.parse(txt.replace(/^\(|\);?$/g,""));setTrims(json.Trims||[]);}catch{setErr("Impossibile caricare le versioni.");}setLoading(false);};
-
-  useEffect(()=>{fetchMakes();},[]);
-
-  const filteredMakes=makes.filter(m=>m.make_display.toLowerCase().includes(search.toLowerCase()));
-  const filteredModels=models.filter(m=>m.model_name.toLowerCase().includes(search.toLowerCase()));
-  const inp={background:"#0f172a",color:"#e2e8f0",border:"1px solid #334155",borderRadius:8,padding:"10px 12px",width:"100%",fontSize:14,boxSizing:"border-box",marginBottom:10};
-
-  const confirm=()=>{
-    if(manuale){
-      if(!manBrand||!manModel||!carburante){alert("Compila marca, modello e carburante");return;}
-      onSelect({brand:manBrand,model:manModel,year:manYear,fuel:carburante,targa:targa.toUpperCase()});
-    } else {
-      if(!selMake||!selModel||!carburante){alert("Seleziona veicolo e carburante");return;}
-      onSelect({brand:selMake.make_display,model:selModel.model_name,year:selTrim?selTrim.model_year:"",fuel:carburante,targa:targa.toUpperCase()});
-    }
-  };
-
-  return (
-    <Modal onClose={onClose} title="🔍 Seleziona Veicolo">
-      <div style={{display:"flex",gap:8,marginBottom:14}}>
-        <button onClick={()=>setManuale(false)} style={{flex:1,background:!manuale?"#7c3aed":"#334155",color:"#e2e8f0",border:"none",borderRadius:10,padding:"8px",cursor:"pointer",fontSize:13,fontWeight:!manuale?700:400}}>🔍 Cerca database</button>
-        <button onClick={()=>setManuale(true)} style={{flex:1,background:manuale?"#7c3aed":"#334155",color:"#e2e8f0",border:"none",borderRadius:10,padding:"8px",cursor:"pointer",fontSize:13,fontWeight:manuale?700:400}}>✏️ Inserimento manuale</button>
-      </div>
-
-      {manuale ? (
-        <>
-          <div style={{fontSize:12,color:"#94a3b8",marginBottom:4}}>Marca *</div>
-          <input value={manBrand} onChange={e=>setManBrand(e.target.value)} placeholder="es. Fiat" style={inp}/>
-          <div style={{fontSize:12,color:"#94a3b8",marginBottom:4}}>Modello *</div>
-          <input value={manModel} onChange={e=>setManModel(e.target.value)} placeholder="es. Tipo Cross" style={inp}/>
-          <div style={{fontSize:12,color:"#94a3b8",marginBottom:4}}>Anno</div>
-          <input value={manYear} onChange={e=>setManYear(e.target.value)} placeholder="es. 2022" style={inp}/>
-          <div style={{fontSize:12,color:"#94a3b8",marginBottom:4}}>⛽ Carburante *</div>
-          <select value={carburante} onChange={e=>setCarburante(e.target.value)} style={inp}>
-            <option value="">— Seleziona —</option>
-            {FUEL_TYPES.map(f=><option key={f}>{f}</option>)}
-          </select>
-          <div style={{fontSize:12,color:"#94a3b8",marginBottom:4}}>Targa</div>
-          <input value={targa} onChange={e=>setTarga(e.target.value.toUpperCase())} placeholder="es. AB123CD" maxLength={8} style={inp}/>
-          <button onClick={confirm} style={{width:"100%",background:"linear-gradient(135deg,#1e40af,#7c3aed)",color:"#fff",border:"none",borderRadius:12,padding:14,cursor:"pointer",fontSize:15,fontWeight:700,marginTop:4}}>✅ Conferma</button>
-        </>
-      ) : (
-        <>
-          <div style={{display:"flex",gap:6,marginBottom:12,flexWrap:"wrap"}}>
-            {[
-              {s:"make",label:selMake?selMake.make_display:"Marca"},
-              selMake&&{s:"model",label:selModel?selModel.model_name:"Modello"},
-              selModel&&{s:"trim",label:"Versione"},
-              selModel&&{s:"confirm",label:"✅ Conferma"},
-            ].filter(Boolean).map((b,i)=>(
-              <button key={i} onClick={()=>setStep(b.s)} style={{background:step===b.s?"#7c3aed":"#334155",color:"#e2e8f0",border:"none",borderRadius:20,padding:"4px 12px",cursor:"pointer",fontSize:12,fontWeight:step===b.s?700:400}}>{b.label}</button>
-            ))}
-          </div>
-          {err&&<div style={{background:"#7f1d1d",borderRadius:8,padding:10,fontSize:13,marginBottom:10,color:"#fca5a5"}}>⚠️ {err}<br/><span style={{fontSize:12}}>Prova l'inserimento manuale →</span></div>}
-          {step==="make"&&<>
-            <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Filtra marca... (es. Fiat)" style={inp}/>
-            {loading&&<div style={{color:"#64748b",fontSize:13,textAlign:"center",padding:20}}>⏳ Caricamento...</div>}
-            <div style={{maxHeight:300,overflowY:"auto"}}>
-              {filteredMakes.map((m,i)=>(
-                <div key={i} onClick={()=>{setSelMake(m);setSelModel(null);setSelTrim(null);setSearch("");setStep("model");fetchModels(m.make_id);}}
-                  style={{background:"#0f172a",borderRadius:10,padding:"11px 14px",marginBottom:6,cursor:"pointer",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                  <span style={{fontWeight:600,fontSize:14}}>{m.make_display}</span><span style={{color:"#7c3aed"}}>›</span>
-                </div>
-              ))}
-            </div>
-          </>}
-          {step==="model"&&<>
-            <input value={search} onChange={e=>setSearch(e.target.value)} placeholder={`Modello ${selMake?.make_display}...`} style={inp}/>
-            {loading&&<div style={{color:"#64748b",fontSize:13,textAlign:"center",padding:20}}>⏳ Caricamento...</div>}
-            <div style={{marginBottom:8,fontSize:12,color:"#64748b"}}>💡 Modello non trovato? Usa "Inserimento manuale" per modelli recenti (es. Tipo Cross)</div>
-            <div style={{maxHeight:280,overflowY:"auto"}}>
-              {filteredModels.map((m,i)=>(
-                <div key={i} onClick={()=>{setSelModel(m);setSelTrim(null);setSearch("");setStep("trim");fetchTrims(selMake.make_id,m.model_name);}}
-                  style={{background:"#0f172a",borderRadius:10,padding:"11px 14px",marginBottom:6,cursor:"pointer",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                  <span style={{fontWeight:600,fontSize:14}}>{m.model_name}</span><span style={{color:"#7c3aed"}}>›</span>
-                </div>
-              ))}
-            </div>
-          </>}
-          {step==="trim"&&<>
-            <div style={{fontSize:13,color:"#94a3b8",marginBottom:8}}>Versione (opzionale)</div>
-            {loading&&<div style={{color:"#64748b",fontSize:13,textAlign:"center",padding:20}}>⏳ Caricamento...</div>}
-            <div style={{maxHeight:240,overflowY:"auto"}}>
-              <div onClick={()=>{setSelTrim(null);setStep("confirm");}} style={{background:"#0f172a",borderRadius:10,padding:"11px 14px",marginBottom:6,cursor:"pointer",border:"1px dashed #334155"}}>
-                <span style={{fontSize:13,color:"#64748b"}}>⏭ Salta</span>
-              </div>
-              {trims.map((t,i)=>(
-                <div key={i} onClick={()=>{setSelTrim(t);setCarburante(fuelLabel(t.model_engine_type));setStep("confirm");}}
-                  style={{background:"#0f172a",borderRadius:10,padding:"11px 14px",marginBottom:6,cursor:"pointer"}}>
-                  <div style={{fontWeight:600,fontSize:13}}>{t.model_year} · {t.model_trim||"—"}</div>
-                  <div style={{fontSize:11,color:"#94a3b8",marginTop:2}}>{t.model_engine_cc?`${t.model_engine_cc}cc`:""} {t.model_engine_power_hp?`· ${t.model_engine_power_hp}hp`:""} · {fuelLabel(t.model_engine_type)}</div>
-                </div>
-              ))}
-            </div>
-          </>}
-          {step==="confirm"&&<>
-            <div style={{background:"#0f172a",borderRadius:10,padding:14,marginBottom:14}}>
-              <div style={{fontSize:18,fontWeight:700}}>{selMake?.make_display} {selModel?.model_name}</div>
-              {selTrim&&<div style={{fontSize:13,color:"#94a3b8",marginTop:4}}>{selTrim.model_year} · {selTrim.model_trim||""}</div>}
-            </div>
-            <div style={{fontSize:12,color:"#94a3b8",marginBottom:4}}>⛽ Carburante *</div>
-            <select value={carburante} onChange={e=>setCarburante(e.target.value)} style={{...inp,marginBottom:12}}>
-              <option value="">— Seleziona —</option>
-              {FUEL_TYPES.map(f=><option key={f}>{f}</option>)}
-            </select>
-            <div style={{fontSize:12,color:"#94a3b8",marginBottom:4}}>Targa</div>
-            <input value={targa} onChange={e=>setTarga(e.target.value.toUpperCase())} placeholder="es. AB123CD" maxLength={8} style={inp}/>
-            <button onClick={confirm} style={{width:"100%",background:"linear-gradient(135deg,#1e40af,#7c3aed)",color:"#fff",border:"none",borderRadius:12,padding:14,cursor:"pointer",fontSize:15,fontWeight:700,marginTop:4}}>✅ Conferma veicolo</button>
-          </>}
-        </>
-      )}
-    </Modal>
-  );
-}
-
-// ── Import Modal ──────────────────────────────────────────────────────────────
-function ImportModal({onImport,onClose,existingVehicle}) {
-  const GDRIVE_CLIENT_ID = "186081684364-o5vsskphmdp9t9j3eenbo6sns6m6j56c.apps.googleusercontent.com";
-  const GDRIVE_API_KEY   = ""; // non necessaria per Picker con OAuth
-  const GDRIVE_SCOPE     = "https://www.googleapis.com/auth/drive.readonly";
-
-  const openDrivePicker = () => {
-    const loadPicker = () => {
-      window.gapi.load("auth2", () => {
-        window.gapi.auth2.getAuthInstance()?.signOut();
-        window.gapi.auth.authorize({
-          client_id: GDRIVE_CLIENT_ID,
-          scope: GDRIVE_SCOPE,
-          immediate: false,
-        }, authResult => {
-          if (authResult && !authResult.error) {
-            window.gapi.load("picker", () => {
-              const picker = new window.google.picker.PickerBuilder()
-                .addView(new window.google.picker.DocsView()
-                  .setMimeTypes("text/csv,application/vnd.ms-excel,text/plain,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-                )
-                .setOAuthToken(authResult.access_token)
-                .setCallback(async data => {
-                  if (data.action === window.google.picker.Action.PICKED) {
-                    const file = data.docs[0];
-                    try {
-                      // Scarica il contenuto del file
-                      const res = await fetch(
-                        `https://www.googleapis.com/drive/v3/files/${file.id}?alt=media`,
-                        { headers: { Authorization: `Bearer ${authResult.access_token}` } }
-                      );
-                      let text = await res.text();
-                      // Se è un Google Sheet, scarica come CSV
-                      if (file.mimeType === "application/vnd.google-apps.spreadsheet") {
-                        const csvRes = await fetch(
-                          `https://www.googleapis.com/drive/v3/files/${file.id}/export?mimeType=text/csv`,
-                          { headers: { Authorization: `Bearer ${authResult.access_token}` } }
-                        );
-                        text = await csvRes.text();
-                      }
-                      const result = parseCSV(text);
-                      setParsed(result);
-                      setStage("preview");
-                    } catch(e) {
-                      notify("❌ Errore lettura file da Drive: " + e.message, "error");
-                    }
-                  }
-                })
-                .build();
-              picker.setVisible(true);
-            });
-          } else {
-            notify("❌ Accesso a Google Drive negato", "error");
-          }
-        });
-      });
-    };
-    if (window.gapi) loadPicker();
-    else notify("❌ Google API non ancora caricata, riprova tra un secondo", "error");
-  };
-
- // upload | preview | vehicle_confirm
-  const [parsed,setParsed]=useState(null);
-  const [vehicleIssues,setVehicleIssues]=useState([]); // [{row, raw, suggestions}]
-  const [vehicleResolutions,setVehicleResolutions]=useState({});
-  const [importing,setImporting]=useState(false);
-  const fileRef=useRef();
-
-  const handleFile=e=>{
-    const f=e.target.files[0]; if(!f)return;
-    const r=new FileReader(); r.onload=ev=>{
-      const result=parseCSV(ev.target.result);
-      setParsed(result);
-      setStage("preview");
-    }; r.readAsText(f,"UTF-8");
-  };
-
-  const proceedImport=async()=>{
-    setImporting(true);
-    // Apply vehicle resolutions
-    const rows=parsed.rows.map(r=>{
-      const res=vehicleResolutions[r._vehicleRaw];
-      return {...r, vehicle: res||r._vehicleRaw};
-    });
-    await onImport(rows);
-    setImporting(false);
-  };
-
-  const inp={background:"#0f172a",color:"#e2e8f0",border:"1px solid #334155",borderRadius:8,padding:"8px 12px",width:"100%",fontSize:13,boxSizing:"border-box"};
-
-  return (
-    <Modal onClose={onClose} title="📥 Importa CSV">
-      {stage==="upload"&&<>
-        {/* Struttura CSV */}
-        <div style={{background:"#0f172a",borderRadius:12,padding:14,marginBottom:16}}>
-          <div style={{fontWeight:700,fontSize:13,marginBottom:10,color:"#f59e0b"}}>📋 Struttura CSV attesa</div>
-          <div style={{fontSize:12,color:"#94a3b8",marginBottom:8}}>
-            <strong style={{color:"#e2e8f0"}}>Separatore:</strong> virgola <code style={{color:"#f59e0b"}}>,</code> oppure punto e virgola <code style={{color:"#f59e0b"}}>;</code> (rilevato automaticamente)
-          </div>
-          <div style={{fontSize:12,color:"#94a3b8",marginBottom:8}}>
-            <strong style={{color:"#e2e8f0"}}>Formato data:</strong> <code style={{color:"#f59e0b"}}>GG/MM/AAAA</code> (es. 15/03/2023)
-          </div>
-          <div style={{fontSize:12,color:"#94a3b8",marginBottom:8}}>
-            <strong style={{color:"#e2e8f0"}}>Formato ora:</strong> <code style={{color:"#f59e0b"}}>HH:MM</code> (es. 08:30) — opzionale
-          </div>
-          <div style={{fontSize:12,color:"#94a3b8",marginBottom:8}}>
-            <strong style={{color:"#e2e8f0"}}>Decimali:</strong> punto <code style={{color:"#f59e0b"}}>.</code> o virgola <code style={{color:"#f59e0b"}}>,</code> (es. 1.879 o 1,879)
-          </div>
-          <div style={{fontSize:12,color:"#94a3b8",marginBottom:10}}>
-            <strong style={{color:"#e2e8f0"}}>Campi obbligatori:</strong> nessuno — i campi mancanti vengono lasciati vuoti
-          </div>
-          <div style={{fontSize:11,color:"#64748b",marginBottom:6}}>Intestazione (prima riga):</div>
-          <div style={{background:"#1e293b",borderRadius:8,padding:10,fontFamily:"monospace",fontSize:11,color:"#22d3ee",overflowX:"auto",whiteSpace:"nowrap"}}>
-            data,ora,km attuali,km distanza percorsa,importo,prezzo €/litro,carburante,auto
-          </div>
-          <div style={{fontSize:11,color:"#64748b",marginTop:8,marginBottom:6}}>Esempio riga:</div>
-          <div style={{background:"#1e293b",borderRadius:8,padding:10,fontFamily:"monospace",fontSize:11,color:"#94a3b8",overflowX:"auto",whiteSpace:"nowrap"}}>
-            15/03/2023,08:30,45230,312,65.50,1.879,Benzina,Fiat Tipo Cross
-          </div>
-          <div style={{fontSize:11,color:"#64748b",marginTop:6,fontStyle:"italic"}}>
-            ↑ I campi possono essere vuoti: <code>15/03/2023,,45230,,65.50,,,</code>
-          </div>
-        </div>
-        <input type="file" accept=".csv,.txt" onChange={handleFile} ref={fileRef} style={{display:"none"}}/>
-        <button onClick={()=>fileRef.current.click()} style={{width:"100%",background:"linear-gradient(135deg,#1e40af,#7c3aed)",color:"#fff",border:"none",borderRadius:12,padding:14,cursor:"pointer",fontSize:15,fontWeight:700,marginBottom:10}}>📂 Scegli file dal dispositivo</button>
-        <button onClick={openDrivePicker} style={{width:"100%",background:"linear-gradient(135deg,#16a34a,#15803d)",color:"#fff",border:"none",borderRadius:12,padding:14,cursor:"pointer",fontSize:15,fontWeight:700,display:"flex",alignItems:"center",justifyContent:"center",gap:8}}>
-          <svg width="20" height="20" viewBox="0 0 87.3 78" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <path d="M6.6 66.85l3.85 6.65c.8 1.4 1.95 2.5 3.3 3.3l13.75-23.8H0c0 1.55.4 3.1 1.2 4.5z" fill="#0066DA"/>
-            <path d="M43.65 25L29.9 1.2C28.55 2 27.4 3.1 26.6 4.5L1.2 49.05c-.8 1.4-1.2 2.95-1.2 4.5h27.5z" fill="#00AC47"/>
-            <path d="M73.55 76.8c1.35-.8 2.5-1.9 3.3-3.3l1.6-2.75 7.65-13.25c.8-1.4 1.2-2.95 1.2-4.5H59.8l5.85 11.5z" fill="#EA4335"/>
-            <path d="M43.65 25L57.4 1.2C56.05.4 54.5 0 52.9 0H34.4c-1.6 0-3.15.45-4.5 1.2z" fill="#00832D"/>
-            <path d="M59.8 53.55H27.5L13.75 77.35c1.35.8 2.9 1.2 4.5 1.2h50.8c1.6 0 3.15-.4 4.5-1.2z" fill="#2684FC"/>
-            <path d="M73.4 26.45l-12.65-21.9C59.95 3.1 58.8 2 57.45 1.2L43.7 25l16.15 28h27.45c0-1.55-.4-3.1-1.2-4.5z" fill="#FFBA00"/>
-          </svg>
-          Importa da Google Drive
-        </button>
-      </>}
-
-      {stage==="preview"&&parsed&&<>
-        {/* Summary */}
-        <div style={{background:"#0f172a",borderRadius:10,padding:10,marginBottom:12,fontSize:12,color:"#64748b"}}>
-          Separatore rilevato: <code style={{color:"#f59e0b"}}>{parsed.separatorName}</code>
-        </div>
-        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:16}}>
-          <div style={{background:"#14532d",borderRadius:10,padding:12,textAlign:"center"}}>
-            <div style={{fontSize:22,fontWeight:700,color:"#4ade80"}}>{parsed.rows.length}</div>
-            <div style={{fontSize:12,color:"#86efac"}}>✅ Righe importabili</div>
-          </div>
-          <div style={{background:parsed.warnings.length?"#422006":"#1e293b",borderRadius:10,padding:12,textAlign:"center"}}>
-            <div style={{fontSize:22,fontWeight:700,color:parsed.warnings.length?"#fb923c":"#64748b"}}>{parsed.warnings.length}</div>
-            <div style={{fontSize:12,color:parsed.warnings.length?"#fed7aa":"#64748b"}}>⚠️ Con avvisi</div>
-          </div>
-        </div>
-
-        {/* Warnings detail — non bloccanti */}
-        {parsed.warnings.length>0&&<>
-          <div style={{fontWeight:700,fontSize:13,marginBottom:8,color:"#fb923c"}}>⚠️ Avvisi (righe importate con campi vuoti)</div>
-          <div style={{maxHeight:160,overflowY:"auto",marginBottom:14}}>
-            {parsed.warnings.map((e,i)=>(
-              <div key={i} style={{background:"#1c1008",borderRadius:8,padding:10,marginBottom:6,fontSize:12}}>
-                <div style={{color:"#fb923c",fontWeight:700}}>Riga {e.line}</div>
-                {e.warnings.map((w,j)=><div key={j} style={{color:"#fed7aa",marginTop:2}}>{w}</div>)}
-              </div>
-            ))}
-          </div>
-        </>}
-
-        {/* Vehicle name check */}
-        {parsed.rows.filter(r=>r._vehicleRaw&&!vehicleResolutions[r._vehicleRaw]).length>0&&<>
-          <div style={{fontWeight:700,fontSize:13,marginBottom:8,color:"#f59e0b"}}>🚗 Verifica nomi veicoli</div>
-          {[...new Set(parsed.rows.map(r=>r._vehicleRaw).filter(Boolean))].map(raw=>(
-            <div key={raw} style={{background:"#0f172a",borderRadius:8,padding:10,marginBottom:8}}>
-              <div style={{fontSize:12,color:"#94a3b8",marginBottom:6}}>Trovato nel CSV: <strong style={{color:"#e2e8f0"}}>"{raw}"</strong></div>
-              <input
-                value={vehicleResolutions[raw]||raw}
-                onChange={e=>setVehicleResolutions(prev=>({...prev,[raw]:e.target.value}))}
-                style={inp}
-                placeholder="Correggi il nome se necessario"
-              />
-              {existingVehicle&&raw.toLowerCase()!==`${existingVehicle.brand} ${existingVehicle.model}`.toLowerCase()&&(
-                <button onClick={()=>setVehicleResolutions(prev=>({...prev,[raw]:`${existingVehicle.brand} ${existingVehicle.model}`}))}
-                  style={{marginTop:6,background:"#334155",color:"#e2e8f0",border:"none",borderRadius:6,padding:"4px 10px",cursor:"pointer",fontSize:11}}>
-                  Usa veicolo attivo: {existingVehicle.brand} {existingVehicle.model}
-                </button>
-              )}
-            </div>
-          ))}
-        </>}
-
-        <div style={{display:"flex",gap:8,marginTop:8}}>
-          <button onClick={()=>setStage("upload")} style={{flex:1,background:"#334155",color:"#e2e8f0",border:"none",borderRadius:10,padding:12,cursor:"pointer",fontSize:13}}>← Indietro</button>
-          <button onClick={proceedImport} disabled={importing||parsed.rows.length===0}
-            style={{flex:2,background:parsed.rows.length===0?"#334155":"linear-gradient(135deg,#1e40af,#7c3aed)",color:"#fff",border:"none",borderRadius:10,padding:12,cursor:parsed.rows.length===0?"not-allowed":"pointer",fontSize:14,fontWeight:700}}>
-            {importing?"⏳ Importazione...":parsed.rows.length===0?"Nessuna riga valida":`✅ Importa ${parsed.rows.length} righe`}
-          </button>
-        </div>
-      </>}
-    </Modal>
-  );
-}
-
-// ── Stats Tab ─────────────────────────────────────────────────────────────────
-function StatsTab({refuels}) {
-  const [view,setView]=useState("km_year");
-  const [selYear,setSelYear]=useState(null);
-  const years=useMemo(()=>[...new Set(refuels.map(r=>new Date(r.datetime).getFullYear()))].sort(),[refuels]);
-  const yr=selYear||(years.length?years[years.length-1]:new Date().getFullYear());
-
-  const agg=(fn)=>useMemo(fn,[refuels,yr]);
-
-  const kmByYear=useMemo(()=>{const m={};refuels.forEach(r=>{const y=new Date(r.datetime).getFullYear();if(!m[y])m[y]={min:Infinity,max:-Infinity};if(r.km>0){m[y].min=Math.min(m[y].min,r.km);m[y].max=Math.max(m[y].max,r.km);}});return Object.entries(m).map(([y,v])=>({label:y,value:v.max===-Infinity?0:v.max-(v.min===Infinity?0:v.min)})).sort((a,b)=>a.label-b.label);},[refuels]);
-  const kmByMonth=useMemo(()=>{const m={};refuels.filter(r=>new Date(r.datetime).getFullYear()===yr&&r.kmDelta>0).forEach(r=>{const mo=new Date(r.datetime).getMonth();m[mo]=(m[mo]||0)+r.kmDelta;});return MONTHS_IT.map((l,i)=>({label:l,value:m[i]||0}));},[refuels,yr]);
-  const priceMonth=useMemo(()=>{const m={};refuels.filter(r=>new Date(r.datetime).getFullYear()===yr&&r.pricePerLiter>0).forEach(r=>{const mo=new Date(r.datetime).getMonth();if(!m[mo])m[mo]=[];m[mo].push(r.pricePerLiter);});return MONTHS_IT.map((l,i)=>({label:l,value:m[i]?m[i].reduce((s,v)=>s+v,0)/m[i].length:0}));},[refuels,yr]);
-  const priceYear=useMemo(()=>{const m={};refuels.filter(r=>r.pricePerLiter>0).forEach(r=>{const y=new Date(r.datetime).getFullYear();if(!m[y])m[y]=[];m[y].push(r.pricePerLiter);});return Object.entries(m).map(([y,a])=>({label:y,value:a.reduce((s,v)=>s+v,0)/a.length})).sort((a,b)=>a.label-b.label);},[refuels]);
-  const spesaMonth=useMemo(()=>{const m={};refuels.filter(r=>new Date(r.datetime).getFullYear()===yr).forEach(r=>{const mo=new Date(r.datetime).getMonth();m[mo]=(m[mo]||0)+(r.amount||0);});return MONTHS_IT.map((l,i)=>({label:l,value:m[i]||0}));},[refuels,yr]);
-  const spesaYear=useMemo(()=>{const m={};refuels.forEach(r=>{const y=new Date(r.datetime).getFullYear();m[y]=(m[y]||0)+(r.amount||0);});return Object.entries(m).map(([y,v])=>({label:y,value:v})).sort((a,b)=>a.label-b.label);},[refuels]);
-  const consumoMonth=useMemo(()=>{const m={};refuels.filter(r=>new Date(r.datetime).getFullYear()===yr&&r.amount>0&&r.kmDelta>0&&r.pricePerLiter>0).forEach(r=>{const mo=new Date(r.datetime).getMonth();if(!m[mo])m[mo]=[];m[mo].push(r.amount/r.pricePerLiter/r.kmDelta*100);});return MONTHS_IT.map((l,i)=>({label:l,value:m[i]?m[i].reduce((s,v)=>s+v,0)/m[i].length:0}));},[refuels,yr]);
-
-  const views=[{id:"km_year",l:"🛣️ Km/Anno"},{id:"km_month",l:"📅 Km/Mese"},{id:"price_month",l:"💶 Prezzo/Mese"},{id:"price_year",l:"📈 Prezzo/Anno"},{id:"spesa_month",l:"🧾 Spesa/Mese"},{id:"spesa_year",l:"🧾 Spesa/Anno"},{id:"consumo",l:"⚡ Consumo"}];
-  const needsYear=["km_month","price_month","spesa_month","consumo"].includes(view);
-
-  if(!refuels.length) return <div style={{textAlign:"center",color:"#64748b",padding:40}}><div style={{fontSize:48}}>📊</div><div style={{marginTop:12}}>Aggiungi rifornimenti per le statistiche!</div></div>;
-
-  return (
-    <div>
-      <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:12}}>
-        {views.map(v=><button key={v.id} onClick={()=>setView(v.id)} style={{background:view===v.id?"#7c3aed":"#1e293b",color:"#e2e8f0",border:"none",borderRadius:20,padding:"6px 12px",cursor:"pointer",fontSize:12,fontWeight:view===v.id?700:400}}>{v.l}</button>)}
-      </div>
-      {needsYear&&<div style={{display:"flex",gap:6,marginBottom:12,flexWrap:"wrap"}}>{years.map(y=><button key={y} onClick={()=>setSelYear(y)} style={{background:yr===y?"#f59e0b":"#1e293b",color:yr===y?"#000":"#e2e8f0",border:"none",borderRadius:20,padding:"5px 14px",cursor:"pointer",fontSize:13,fontWeight:700}}>{y}</button>)}</div>}
-      {view==="km_year"&&<StatCard title="🛣️ Km/anno" sub="Distanza totale per anno"><BarChart data={kmByYear} color="#3b82f6" valueFormatter={v=>v>0?`${(v/1000).toFixed(1)}k`:"0"}/><StatTable rows={kmByYear.map(d=>({Anno:d.label,"Km":d.value>0?`${d.value.toLocaleString("it-IT")} km`:"N/D"}))}/></StatCard>}
-      {view==="km_month"&&<StatCard title={`📅 Km/mese — ${yr}`} sub="Distanza mensile"><BarChart data={kmByMonth} color="#3b82f6" valueFormatter={v=>v>0?`${v}`:"–"}/><StatTable rows={kmByMonth.filter(d=>d.value>0).map(d=>({Mese:d.label,"Km":`${d.value.toLocaleString("it-IT")} km`}))}/></StatCard>}
-      {view==="price_month"&&<StatCard title={`💶 Prezzo/mese — ${yr}`} sub="Prezzo medio al litro"><LineChart data={priceMonth} color="#f59e0b"/><StatTable rows={priceMonth.filter(d=>d.value>0).map(d=>({Mese:d.label,"€/L":`€ ${d.value.toFixed(3)}`}))}/></StatCard>}
-      {view==="price_year"&&<StatCard title="📈 Prezzo/anno" sub="Prezzo medio al litro per anno"><LineChart data={priceYear} color="#f59e0b"/><StatTable rows={priceYear.map(d=>({Anno:d.label,"€/L medio":`€ ${d.value.toFixed(3)}`}))}/></StatCard>}
-      {view==="spesa_month"&&<StatCard title={`🧾 Spesa/mese — ${yr}`} sub="Importo mensile"><BarChart data={spesaMonth} color="#ec4899" valueFormatter={v=>v>0?`€${v.toFixed(0)}`:"–"}/><StatTable rows={spesaMonth.filter(d=>d.value>0).map(d=>({Mese:d.label,Spesa:`€ ${d.value.toFixed(2)}`}))}/></StatCard>}
-      {view==="spesa_year"&&<StatCard title="🧾 Spesa/anno" sub="Spesa totale per anno"><BarChart data={spesaYear} color="#ec4899" valueFormatter={v=>`€${v.toFixed(0)}`}/><StatTable rows={spesaYear.map(d=>({Anno:d.label,Spesa:`€ ${d.value.toFixed(2)}`}))}/></StatCard>}
-      {view==="consumo"&&<StatCard title={`⚡ Consumo/mese — ${yr}`} sub="L/100km per mese"><LineChart data={consumoMonth} color="#22d3ee"/><StatTable rows={consumoMonth.filter(d=>d.value>0).map(d=>({Mese:d.label,"L/100km":`${d.value.toFixed(2)} L`}))}/></StatCard>}
-    </div>
-  );
-}
-
-// ── Main App ──────────────────────────────────────────────────────────────────
-function App() {
-  const fs = useFirestore();
-  const [refuels, loadingRefuels] = useRefuels(fs);
-  const [vehicle, setVehicle] = useVehicle(fs);
-  const [tab,setTab]=useState("dashboard");
-  const [showAdd,setShowAdd]=useState(false);
-  const [showVehicle,setShowVehicle]=useState(false);
-  const [showImport,setShowImport]=useState(false);
-  const [notif,setNotif]=useState(null);
-
-  const notify=(msg,type="success")=>{setNotif({msg,type});setTimeout(()=>setNotif(null),3500);};
-
-  const handleSaveRefuel=async(r)=>{
-    try{await saveRefuel(fs,r);notify("✅ Rifornimento salvato!");}
-    catch(e){notify("❌ Errore salvataggio: "+e.message,"error");}
-  };
-
-  const handleDeleteRefuel=async(id)=>{
-    if(!confirm("Eliminare questo rifornimento?"))return;
-    try{await deleteRefuel(fs,id);notify("Eliminato","error");}
-    catch(e){notify("❌ Errore: "+e.message,"error");}
-  };
-
-  const handleImport=async(rows)=>{
-    try{
-      for(const r of rows) await saveRefuel(fs,r);
-      notify(`✅ ${rows.length} rifornimenti importati!`);
-      setShowImport(false);
-    }catch(e){notify("❌ Errore importazione: "+e.message,"error");}
-  };
-
-  const [showExportModal,setShowExportModal]=useState(false);
-
-  const exportCSV=(fmt)=>{
-    // fmt: "standard" | "excel_it" | "gfogli"
-    const n = v => (v===null||v===undefined) ? "" : v;
-    // Excel IT: sep=; decimale=,
-    // Google Fogli / Standard: sep=, decimale=.
-    const isIT = fmt==="excel_it";
-    const isGF = fmt==="gfogli";
-    const sep = isIT ? ";" : ",";
-    const dec = isIT ? (v => n(v).toString().replace(".",",")) : (v => n(v));
-    const q = v => `"${v}"`;
-
-    const cols = ["data","ora","km attuali","km distanza percorsa","importo","prezzo €/litro","carburante","auto"];
-    const header = cols.join(sep);
-    const dataRows = refuels.map(r => [
-      formatDate(r.datetime),
-      formatTime(r.datetime),
-      dec(r.km),
-      dec(r.kmDelta),
-      dec(r.amount),
-      dec(r.pricePerLiter),
-      r.fuelType||"",
-      q(r.vehicle||""),
-    ].join(sep));
-
-    const ext = isIT ? "csv" : "csv";
-    const mime = "text/csv;charset=utf-8;";
-    // BOM per Excel italiano (riconosce UTF-8)
-    const bom = isIT ? "\uFEFF" : "";
-    const blob=new Blob([bom+[header,...dataRows].join("\n")],{type:mime});
-    const a=document.createElement("a");
-    a.href=URL.createObjectURL(blob);
-    a.download=`rifornimenti_${fmt}.csv`;
-    a.click();
-    setShowExportModal(false);
-  };
-
-  const totalSpent=refuels.reduce((s,r)=>s+(r.amount||0),0);
-  const totalKm=refuels.length>1?refuels[refuels.length-1].km-refuels[0].km:0;
-  const avgPrice=refuels.length?refuels.reduce((s,r)=>s+(r.pricePerLiter||0),0)/refuels.length:0;
-  const valid=refuels.filter(r=>r.amount>0&&r.kmDelta>0&&r.pricePerLiter>0);
-  const avgCons=valid.length?valid.reduce((s,r)=>s+(r.amount/r.pricePerLiter/r.kmDelta*100),0)/valid.length:0;
-  const lastKm=refuels.length?refuels[refuels.length-1].km:0;
-
-  const tabs=[{id:"dashboard",label:"📊",title:"Dashboard"},{id:"stats",label:"📈",title:"Statistiche"},{id:"history",label:"📋",title:"Storico"},{id:"vehicle",label:"🚗",title:"Veicolo"}];
-
-  if(!fs||loadingRefuels) return (
-    <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",height:"100vh",gap:16}}>
-      <div style={{fontSize:48}}>⛽</div>
-      <div style={{color:"#64748b"}}>{!fs?"Connessione a Firebase...":"Caricamento dati..."}</div>
-    </div>
-  );
-
-  return (
-    <div style={{fontFamily:"system-ui,sans-serif",background:"#0f172a",minHeight:"100vh",color:"#e2e8f0",maxWidth:480,margin:"0 auto"}}>
-      <div style={{background:"linear-gradient(135deg,#1e40af,#7c3aed)",padding:"20px 16px 0",position:"sticky",top:0,zIndex:10}}>
-        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",paddingBottom:12}}>
-          <div>
-            <div style={{fontSize:20,fontWeight:700}}>⛽ BenzinApp</div>
-            {vehicle&&<div style={{fontSize:12,opacity:.85,marginTop:2}}>{vehicle.brand} {vehicle.model}{vehicle.targa?` · ${vehicle.targa}`:""}</div>}
-            {!vehicle&&<div style={{fontSize:12,opacity:.6,marginTop:2}}>Nessun veicolo impostato</div>}
-          </div>
-          <button onClick={()=>setShowAdd(true)} style={{background:"#f59e0b",color:"#000",border:"none",borderRadius:12,padding:"10px 16px",fontWeight:700,cursor:"pointer",fontSize:14}}>+ Rifornimento</button>
-        </div>
-        <div style={{display:"flex"}}>
-          {tabs.map(t=>(
-            <button key={t.id} onClick={()=>setTab(t.id)} style={{flex:1,background:"transparent",color:"#fff",border:"none",borderBottom:tab===t.id?"3px solid #f59e0b":"3px solid transparent",padding:"8px 4px",cursor:"pointer",fontSize:12,fontWeight:tab===t.id?700:400}}>
-              {t.label} {t.title}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {notif&&<div style={{position:"fixed",top:16,left:"50%",transform:"translateX(-50%)",background:notif.type==="error"?"#dc2626":"#16a34a",color:"#fff",borderRadius:10,padding:"10px 20px",zIndex:999,fontSize:14,fontWeight:600,boxShadow:"0 4px 20px rgba(0,0,0,0.4)",whiteSpace:"nowrap"}}>{notif.msg}</div>}
-
-      <div style={{padding:16}}>
-        {tab==="dashboard"&&(
-          <div>
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:16}}>
-              {[{label:"Totale speso",value:`€ ${totalSpent.toFixed(2)}`,icon:"💶"},{label:"Km percorsi",value:`${totalKm.toFixed(0)} km`,icon:"🛣️"},{label:"Prezzo medio",value:`€ ${avgPrice.toFixed(3)}/L`,icon:"📈"},{label:"Consumo medio",value:avgCons>0?`${avgCons.toFixed(1)} L/100km`:"N/D",icon:"⚡"}].map((s,i)=>(
-                <div key={i} style={{background:"#1e293b",borderRadius:14,padding:16}}>
-                  <div style={{fontSize:22}}>{s.icon}</div>
-                  <div style={{fontSize:18,fontWeight:700,marginTop:6}}>{s.value}</div>
-                  <div style={{fontSize:11,color:"#94a3b8",marginTop:2}}>{s.label}</div>
-                </div>
-              ))}
-            </div>
-            <div style={{background:"#1e293b",borderRadius:14,padding:16,marginBottom:16}}>
-              <div style={{fontWeight:700,marginBottom:10,fontSize:14}}>📅 Ultimi rifornimenti</div>
-              {refuels.length===0&&<div style={{color:"#64748b",fontSize:13}}>Nessun rifornimento. Aggiungine uno!</div>}
-              {[...refuels].slice(-5).reverse().map(r=>(
-                <div key={r.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 0",borderBottom:"1px solid #334155"}}>
-                  <div>
-                    <div style={{fontSize:13,fontWeight:600}}>{formatDate(r.datetime)} · {r.fuelType}</div>
-                    <div style={{fontSize:11,color:"#94a3b8"}}>{r.kmDelta>0?`+${r.kmDelta} km`:""} {r.vehicle?`· ${r.vehicle}`:""}</div>
-                  </div>
-                  <div style={{textAlign:"right"}}>
-                    <div style={{color:"#f59e0b",fontWeight:700}}>€ {(r.amount||0).toFixed(2)}</div>
-                    <div style={{fontSize:11,color:"#94a3b8"}}>€ {(r.pricePerLiter||0).toFixed(3)}/L</div>
-                  </div>
-                </div>
-              ))}
-            </div>
-            <div style={{display:"flex",gap:8}}>
-              <button onClick={()=>setShowImport(true)} style={{flex:1,background:"#334155",color:"#e2e8f0",border:"none",borderRadius:10,padding:12,cursor:"pointer",fontSize:13,fontWeight:600}}>📥 Importa CSV</button>
-              <button onClick={()=>setShowExportModal(true)} style={{flex:1,background:"#334155",color:"#e2e8f0",border:"none",borderRadius:10,padding:12,cursor:"pointer",fontSize:13,fontWeight:600}}>📤 Esporta CSV</button>
-            </div>
-            <div style={{marginTop:8,fontSize:11,color:"#475569",textAlign:"center"}}>☁️ Dati sincronizzati su Firebase · disponibili su tutti i dispositivi</div>
-          </div>
-        )}
-        {tab==="stats"&&<StatsTab refuels={refuels}/>}
-        {tab==="history"&&(
-          <div>
-            <div style={{fontWeight:700,marginBottom:12}}>📋 Storico ({refuels.length})</div>
-            {refuels.length===0&&<div style={{color:"#64748b",fontSize:13}}>Nessun rifornimento registrato.</div>}
-            {[...refuels].reverse().map(r=>(
-              <div key={r.id} style={{background:"#1e293b",borderRadius:12,padding:14,marginBottom:10}}>
-                <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
-                  <div>
-                    <div style={{fontWeight:700,fontSize:15}}>{formatDate(r.datetime)} {formatTime(r.datetime)}</div>
-                    <div style={{fontSize:12,color:"#94a3b8",marginTop:2}}>{r.fuelType}{r.vehicle?` · ${r.vehicle}`:""}</div>
-                  </div>
-                  <button onClick={()=>handleDeleteRefuel(r.id)} style={{background:"transparent",border:"none",color:"#ef4444",cursor:"pointer",fontSize:18,padding:0}}>🗑️</button>
-                </div>
-                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginTop:10}}>
-                  {[{l:"Km attuali",v:r.km?`${r.km.toLocaleString("it-IT")} km`:"-"},{l:"Percorsi",v:r.kmDelta>0?`+${r.kmDelta} km`:"-"},{l:"Importo",v:`€ ${(r.amount||0).toFixed(2)}`}].map((x,i)=>(
-                    <div key={i} style={{background:"#0f172a",borderRadius:8,padding:8,textAlign:"center"}}>
-                      <div style={{fontSize:13,fontWeight:700,color:"#f59e0b"}}>{x.v}</div>
-                      <div style={{fontSize:10,color:"#64748b",marginTop:2}}>{x.l}</div>
-                    </div>
-                  ))}
-                </div>
-                <div style={{marginTop:8,fontSize:12,color:"#94a3b8"}}>€ {(r.pricePerLiter||0).toFixed(3)}/litro</div>
-              </div>
-            ))}
-          </div>
-        )}
-        {tab==="vehicle"&&(
-          <div>
-            <div style={{fontWeight:700,marginBottom:12}}>🚗 Il mio Veicolo</div>
-            {vehicle?(
-              <div style={{background:"#1e293b",borderRadius:14,padding:20,marginBottom:16}}>
-                <div style={{fontSize:22,marginBottom:8}}>🚘</div>
-                <div style={{fontSize:20,fontWeight:700}}>{vehicle.brand} {vehicle.model}</div>
-                <div style={{color:"#94a3b8",marginTop:4}}>{vehicle.year?`${vehicle.year} · `:""}{vehicle.fuel}{vehicle.targa?` · ${vehicle.targa}`:""}</div>
-                <div style={{marginTop:8,fontSize:12,color:"#475569"}}>☁️ Sincronizzato su tutti i dispositivi</div>
-                <button onClick={()=>setVehicle(null).then?setVehicle(null):setVehicle(null)} style={{marginTop:14,background:"#dc2626",color:"#fff",border:"none",borderRadius:8,padding:"8px 16px",cursor:"pointer",fontSize:13}} onClick={async()=>{await setVehicle(null);notify("Veicolo rimosso","error");}}>Rimuovi veicolo</button>
-              </div>
-            ):(
-              <div style={{background:"#1e293b",borderRadius:14,padding:20,marginBottom:16,color:"#64748b"}}>Nessun veicolo selezionato.</div>
-            )}
-            <button onClick={()=>setShowVehicle(true)} style={{width:"100%",background:"linear-gradient(135deg,#1e40af,#7c3aed)",color:"#fff",border:"none",borderRadius:12,padding:14,cursor:"pointer",fontSize:15,fontWeight:700}}>
-              🔍 Seleziona veicolo
-            </button>
-          </div>
-        )}
-      </div>
-
-      {showExportModal&&(
-        <Modal onClose={()=>setShowExportModal(false)} title="📤 Esporta CSV">
-          <div style={{fontSize:13,color:"#94a3b8",marginBottom:16}}>Scegli il formato in base a dove vuoi aprire il file:</div>
-          {[
-            {id:"standard", icon:"🌐", label:"Standard / Re-import app", desc:"Virgola (,) separatore · Punto (.) decimale · Compatibile con questa app e la maggior parte dei software"},
-            {id:"excel_it", icon:"📗", label:"Excel italiano", desc:"Punto e virgola (;) separatore · Virgola (,) decimale · BOM UTF-8 incluso · Si apre correttamente in Excel con impostazioni italiane"},
-            {id:"gfogli",   icon:"📊", label:"Google Fogli", desc:"Virgola (,) separatore · Punto (.) decimale · Ottimale per importare in Google Fogli"},
-          ].map(f=>(
-            <button key={f.id} onClick={()=>exportCSV(f.id)}
-              style={{width:"100%",background:"#0f172a",border:"1px solid #334155",borderRadius:12,padding:14,cursor:"pointer",marginBottom:10,textAlign:"left",color:"#e2e8f0"}}>
-              <div style={{fontSize:16,fontWeight:700,marginBottom:4}}>{f.icon} {f.label}</div>
-              <div style={{fontSize:12,color:"#64748b"}}>{f.desc}</div>
-            </button>
-          ))}
-        </Modal>
-      )}
-      {showAdd&&<AddRefuelModal vehicle={vehicle} lastKm={lastKm} onSave={async r=>{await handleSaveRefuel(r);setShowAdd(false);}} onClose={()=>setShowAdd(false)}/>}
-      {showVehicle&&<VehicleModal onSelect={async v=>{await setVehicle(v);notify(`🚗 Veicolo: ${v.brand} ${v.model}`);setShowVehicle(false);}} onClose={()=>setShowVehicle(false)}/>}
-      {showImport&&<ImportModal onImport={handleImport} onClose={()=>setShowImport(false)} existingVehicle={vehicle}/>}
-    </div>
-  );
-}
-
-ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
-</script>
-</body>
-</html>
+// ─── AddRefuelModal ───────────────────────────────────────────────────────────
+function AddRefuelModal({vehicle,lastKm,onSave,onClose}){
+  const [fuelType,setFuelType]=useState(vehicle?.fuel&&FUEL_TYPES.includes(vehicle.fuel)?vehicle.fuel:FUEL_TYPES[0
