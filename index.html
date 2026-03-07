@@ -8,6 +8,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
   <script src="https://apis.google.com/js/api.js"></script>
+  <script src="https://accounts.google.com/gsi/client"></script>
   <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
     import { getFirestore, collection, doc, setDoc, deleteDoc, onSnapshot, query, orderBy } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
@@ -453,16 +454,20 @@ function ImportModal({onImport,onClose,existingVehicle,notify}){
   };
 
   const openDrive=()=>{
-    if(!window.gapi){notify("❌ Google API non caricata, riprova","error");return;}
+    if(!window.google?.accounts?.oauth2){notify("❌ Google API non caricata, riprova tra un secondo","error");return;}
     setDriveLoading(true);
-    window.gapi.load("auth2",()=>{
-      window.gapi.auth.authorize({client_id:GDRIVE_CLIENT_ID,scope:GDRIVE_SCOPE,immediate:false},async authResult=>{
-        if(!authResult||authResult.error){notify("❌ Accesso Drive negato","error");setDriveLoading(false);return;}
+    const client = window.google.accounts.oauth2.initTokenClient({
+      client_id: GDRIVE_CLIENT_ID,
+      scope: GDRIVE_SCOPE,
+      callback: async tokenResp => {
+        if(tokenResp.error){notify("❌ Accesso Drive negato","error");setDriveLoading(false);return;}
+        const token = tokenResp.access_token;
         window.gapi.load("picker",()=>{
           setDriveLoading(false);
           new window.google.picker.PickerBuilder()
-            .addView(new window.google.picker.DocsView().setMimeTypes("text/csv,text/plain,application/vnd.google-apps.spreadsheet"))
-            .setOAuthToken(authResult.access_token)
+            .addView(new window.google.picker.DocsView()
+              .setMimeTypes("text/csv,text/plain,application/vnd.google-apps.spreadsheet"))
+            .setOAuthToken(token)
             .setCallback(async data=>{
               if(data.action!==window.google.picker.Action.PICKED) return;
               const file=data.docs[0];
@@ -470,13 +475,14 @@ function ImportModal({onImport,onClose,existingVehicle,notify}){
                 const url=file.mimeType==="application/vnd.google-apps.spreadsheet"
                   ?`https://www.googleapis.com/drive/v3/files/${file.id}/export?mimeType=text/csv`
                   :`https://www.googleapis.com/drive/v3/files/${file.id}?alt=media`;
-                const res=await fetch(url,{headers:{Authorization:`Bearer ${authResult.access_token}`}});
+                const res=await fetch(url,{headers:{Authorization:`Bearer ${token}`}});
                 handleParsed(await res.text());
               }catch(e){notify("❌ Errore lettura Drive: "+e.message,"error");}
             }).build().setVisible(true);
         });
-      });
+      },
     });
+    client.requestAccessToken();
   };
 
   const doImport=async()=>{
