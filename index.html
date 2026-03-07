@@ -7,6 +7,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <script src="https://apis.google.com/js/api.js"></script>
   <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
     import { getFirestore, collection, doc, setDoc, deleteDoc, onSnapshot, query, orderBy } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
@@ -61,71 +62,106 @@ function fuzzyScore(a, b) {
 }
 
 // ── CSV Parser ───────────────────────────────────────────────────────────────
-function parseCSV(text) {
-  // Auto-detect separator: comma or semicolon
-  const firstLine = text.trim().split("\n")[0];
-  const sep = (firstLine.split(";").length > firstLine.split(",").length) ? ";" : ",";
+// Converte un valore stringa numerico in float, gestendo virgola e punto decimale
+function parseNum(raw) {
+  if (!raw || !raw.trim()) return null;
+  // Rimuovi spazi, simboli valuta, caratteri non numerici tranne ,.+-
+  let s = raw.trim().replace(/[€$£\s]/g,"");
+  // Caso europeo: 1.234,56 → 1234.56
+  if (/^\d{1,3}(\.\d{3})+(,\d+)?$/.test(s)) s = s.replace(/\./g,"").replace(",",".");
+  // Caso con solo virgola decimale: 1,879 o 65,50
+  else if (/^\d+(,\d+)$/.test(s)) s = s.replace(",",".");
+  // Già ok con punto decimale
+  const n = parseFloat(s);
+  return isNaN(n) ? null : n;
+}
 
-  const lines = text.trim().split("\n");
-  const header = lines[0].split(sep).map(h => h.trim().toLowerCase().replace(/['"]/g,""));
+// Rileva separatore di colonna dal CSV
+function detectSeparator(line) {
+  const sc = (line.match(/;/g)||[]).length;
+  const tc = (line.match(/\t/g)||[]).length;
+  const cc = (line.match(/,/g)||[]).length;
+  if (tc >= sc && tc >= cc) return "\t";
+  if (sc > cc) return ";";
+  return ",";
+}
+
+// Splitta una riga CSV rispettando i campi tra virgolette
+function splitCSVLine(line, sep) {
+  const result = [];
+  let cur = "", inQ = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '"') { inQ = !inQ; continue; }
+    if (ch === sep && !inQ) { result.push(cur.trim()); cur = ""; continue; }
+    cur += ch;
+  }
+  result.push(cur.trim());
+  return result;
+}
+
+function parseCSV(text) {
+  // Normalizza fine riga
+  text = text.replace(/\r\n/g,"\n").replace(/\r/g,"\n");
+  const lines = text.trim().split("\n").filter(l => l.trim());
+  if (lines.length < 2) return { rows:[], warnings:[{line:1, warnings:["File vuoto o con una sola riga"]}], separator:"," };
+
+  const sep = detectSeparator(lines[0]);
+  const sepName = sep==="\t" ? "tab (Excel)" : sep===";" ? "punto e virgola (;)" : "virgola (,)";
+  const header = splitCSVLine(lines[0], sep).map(h => h.toLowerCase().replace(/['"]/g,"").trim());
+
   const rows = [], warnings = [];
 
   for (let i = 1; i < lines.length; i++) {
     const raw = lines[i];
     if (!raw.trim()) continue;
-    const cols = raw.split(sep).map(c => c.trim().replace(/^"|"$/g,""));
-    const obj = {}; header.forEach((h,idx) => obj[h] = cols[idx]||"");
+    const cols = splitCSVLine(raw, sep);
+    const obj = {}; header.forEach((h,idx) => obj[h] = (cols[idx]||"").trim());
 
     const rowWarnings = [];
 
-    // Data — opzionale, lascia null se mancante
+    // Data
     const dateStr = obj["data"]||obj["date"]||"";
     const timeStr = obj["ora"]||obj["time"]||"";
     let dt = null;
     if (dateStr) {
       try {
-        const parts = dateStr.split("/");
-        if (parts.length !== 3) throw new Error();
-        const [d,m,y] = parts;
-        const timepart = timeStr || "00:00";
-        const candidate = new Date(`${y}-${m.padStart(2,"0")}-${d.padStart(2,"0")}T${timepart}:00`);
+        // Supporta GG/MM/AAAA, GG-MM-AAAA, AAAA-MM-GG
+        let d,m,y;
+        if (/\d{4}-\d{2}-\d{2}/.test(dateStr)) { [y,m,d]=dateStr.split("-"); }
+        else { const parts=dateStr.split(/[\/\-]/); [d,m,y]=parts; }
+        const timepart = timeStr||"00:00";
+        const candidate = new Date(`${y}-${m.padStart(2,"0")}-${d.padStart(2,"0")}T${timepart.slice(0,5)}:00`);
         if (isNaN(candidate)) throw new Error();
         dt = candidate.toISOString();
-      } catch { rowWarnings.push(`⚠️ data non riconosciuta: "${dateStr}" — lasciata vuota`); dt = null; }
-    } else {
-      rowWarnings.push("ℹ️ data mancante — lasciata vuota");
+      } catch { rowWarnings.push(`⚠️ data non riconosciuta: "${dateStr}" — lasciata vuota`); }
     }
 
-    // Km — opzionale
-    const kmRaw = obj["km attuali"]||obj["km"]||"";
-    const km = kmRaw ? parseFloat(kmRaw.replace(",",".")) : null;
-    if (kmRaw && isNaN(km)) rowWarnings.push(`⚠️ km non validi: "${kmRaw}" — lasciati vuoti`);
+    const kmRaw    = obj["km attuali"]||obj["km"]||"";
+    const amtRaw   = obj["importo"]||"";
+    const priceRaw = obj["prezzo €/litro"]||obj["prezzo €/l"]||obj["prezzo/litro"]||obj["prezzo"]||"";
+    const deltaRaw = obj["km distanza percorsa"]||obj["kmdistanza percorsa"]||obj["distanza"]||"";
 
-    // Importo — opzionale
-    const amtRaw = obj["importo"]||"";
-    const amount = amtRaw ? parseFloat(amtRaw.replace(",",".")) : null;
-    if (amtRaw && isNaN(amount)) rowWarnings.push(`⚠️ importo non valido: "${amtRaw}" — lasciato vuoto`);
+    const km    = parseNum(kmRaw);
+    const amount= parseNum(amtRaw);
+    const price = parseNum(priceRaw);
+    const kmDelta=parseNum(deltaRaw);
 
-    // Prezzo — opzionale
-    const priceRaw = obj["prezzo €/litro"]||obj["prezzo €/l"]||obj["prezzo"]||"";
-    const price = priceRaw ? parseFloat(priceRaw.replace(",",".")) : null;
-    if (priceRaw && isNaN(price)) rowWarnings.push(`⚠️ prezzo non valido: "${priceRaw}" — lasciato vuoto`);
+    if (kmRaw    && km    === null) rowWarnings.push(`⚠️ km non validi: "${kmRaw}" — lasciati vuoti`);
+    if (amtRaw   && amount=== null) rowWarnings.push(`⚠️ importo non valido: "${amtRaw}" — lasciato vuoto`);
+    if (priceRaw && price === null) rowWarnings.push(`⚠️ prezzo non valido: "${priceRaw}" — lasciato vuoto`);
 
-    // kmDelta — opzionale, ricalcolato dopo se mancante
-    const kmDeltaRaw = obj["km distanza percorsa"]||obj["kmdistanza percorsa"]||obj["distanza"]||"";
-    const kmDelta = kmDeltaRaw ? parseFloat(kmDeltaRaw.replace(",",".")) : null;
-
-    const fuelType = obj["carburante"]||obj["fuel"]||"";
+    const fuelType   = obj["carburante"]||obj["fuel"]||"Benzina";
     const vehicleRaw = obj["auto"]||obj["veicolo"]||"";
 
     const row = {
       id: btoa([dateStr||"", kmRaw||"", amtRaw||"", priceRaw||"", i].join("|")).replace(/[^a-zA-Z0-9]/g,"").slice(0,28),
       datetime: dt,
-      fuelType: fuelType||"Benzina",
-      km: (!isNaN(km) && km!==null) ? km : null,
-      kmDelta: (!isNaN(kmDelta) && kmDelta!==null) ? kmDelta : null,
-      amount: (!isNaN(amount) && amount!==null) ? amount : null,
-      pricePerLiter: (!isNaN(price) && price!==null) ? price : null,
+      fuelType,
+      km,
+      kmDelta,
+      amount,
+      pricePerLiter: price,
       vehicle: vehicleRaw,
       _vehicleRaw: vehicleRaw,
     };
@@ -134,15 +170,15 @@ function parseCSV(text) {
     rows.push(row);
   }
 
-  // Ricalcola kmDelta mancanti usando km sequenziali
+  // Ricalcola kmDelta mancanti
   for (let i = 1; i < rows.length; i++) {
-    if ((rows[i].kmDelta === null || rows[i].kmDelta === 0) && rows[i].km && rows[i-1].km) {
+    if (!rows[i].kmDelta && rows[i].km && rows[i-1].km) {
       const delta = rows[i].km - rows[i-1].km;
       if (delta > 0) rows[i].kmDelta = delta;
     }
   }
 
-  return { rows, warnings, separator: sep };
+  return { rows, warnings, separator: sep, separatorName: sepName };
 }
 
 // ── Normalizza nome veicolo ──────────────────────────────────────────────────
@@ -482,7 +518,66 @@ function VehicleModal({onSelect,onClose}) {
 
 // ── Import Modal ──────────────────────────────────────────────────────────────
 function ImportModal({onImport,onClose,existingVehicle}) {
-  const [stage,setStage]=useState("upload"); // upload | preview | vehicle_confirm
+  const GDRIVE_CLIENT_ID = "186081684364-o5vsskphmdp9t9j3eenbo6sns6m6j56c.apps.googleusercontent.com";
+  const GDRIVE_API_KEY   = ""; // non necessaria per Picker con OAuth
+  const GDRIVE_SCOPE     = "https://www.googleapis.com/auth/drive.readonly";
+
+  const openDrivePicker = () => {
+    const loadPicker = () => {
+      window.gapi.load("auth2", () => {
+        window.gapi.auth2.getAuthInstance()?.signOut();
+        window.gapi.auth.authorize({
+          client_id: GDRIVE_CLIENT_ID,
+          scope: GDRIVE_SCOPE,
+          immediate: false,
+        }, authResult => {
+          if (authResult && !authResult.error) {
+            window.gapi.load("picker", () => {
+              const picker = new window.google.picker.PickerBuilder()
+                .addView(new window.google.picker.DocsView()
+                  .setMimeTypes("text/csv,application/vnd.ms-excel,text/plain,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                )
+                .setOAuthToken(authResult.access_token)
+                .setCallback(async data => {
+                  if (data.action === window.google.picker.Action.PICKED) {
+                    const file = data.docs[0];
+                    try {
+                      // Scarica il contenuto del file
+                      const res = await fetch(
+                        `https://www.googleapis.com/drive/v3/files/${file.id}?alt=media`,
+                        { headers: { Authorization: `Bearer ${authResult.access_token}` } }
+                      );
+                      let text = await res.text();
+                      // Se è un Google Sheet, scarica come CSV
+                      if (file.mimeType === "application/vnd.google-apps.spreadsheet") {
+                        const csvRes = await fetch(
+                          `https://www.googleapis.com/drive/v3/files/${file.id}/export?mimeType=text/csv`,
+                          { headers: { Authorization: `Bearer ${authResult.access_token}` } }
+                        );
+                        text = await csvRes.text();
+                      }
+                      const result = parseCSV(text);
+                      setParsed(result);
+                      setStage("preview");
+                    } catch(e) {
+                      notify("❌ Errore lettura file da Drive: " + e.message, "error");
+                    }
+                  }
+                })
+                .build();
+              picker.setVisible(true);
+            });
+          } else {
+            notify("❌ Accesso a Google Drive negato", "error");
+          }
+        });
+      });
+    };
+    if (window.gapi) loadPicker();
+    else notify("❌ Google API non ancora caricata, riprova tra un secondo", "error");
+  };
+
+ // upload | preview | vehicle_confirm
   const [parsed,setParsed]=useState(null);
   const [vehicleIssues,setVehicleIssues]=useState([]); // [{row, raw, suggestions}]
   const [vehicleResolutions,setVehicleResolutions]=useState({});
@@ -545,13 +640,24 @@ function ImportModal({onImport,onClose,existingVehicle}) {
           </div>
         </div>
         <input type="file" accept=".csv,.txt" onChange={handleFile} ref={fileRef} style={{display:"none"}}/>
-        <button onClick={()=>fileRef.current.click()} style={{width:"100%",background:"linear-gradient(135deg,#1e40af,#7c3aed)",color:"#fff",border:"none",borderRadius:12,padding:14,cursor:"pointer",fontSize:15,fontWeight:700}}>📂 Scegli file CSV</button>
+        <button onClick={()=>fileRef.current.click()} style={{width:"100%",background:"linear-gradient(135deg,#1e40af,#7c3aed)",color:"#fff",border:"none",borderRadius:12,padding:14,cursor:"pointer",fontSize:15,fontWeight:700,marginBottom:10}}>📂 Scegli file dal dispositivo</button>
+        <button onClick={openDrivePicker} style={{width:"100%",background:"linear-gradient(135deg,#16a34a,#15803d)",color:"#fff",border:"none",borderRadius:12,padding:14,cursor:"pointer",fontSize:15,fontWeight:700,display:"flex",alignItems:"center",justifyContent:"center",gap:8}}>
+          <svg width="20" height="20" viewBox="0 0 87.3 78" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M6.6 66.85l3.85 6.65c.8 1.4 1.95 2.5 3.3 3.3l13.75-23.8H0c0 1.55.4 3.1 1.2 4.5z" fill="#0066DA"/>
+            <path d="M43.65 25L29.9 1.2C28.55 2 27.4 3.1 26.6 4.5L1.2 49.05c-.8 1.4-1.2 2.95-1.2 4.5h27.5z" fill="#00AC47"/>
+            <path d="M73.55 76.8c1.35-.8 2.5-1.9 3.3-3.3l1.6-2.75 7.65-13.25c.8-1.4 1.2-2.95 1.2-4.5H59.8l5.85 11.5z" fill="#EA4335"/>
+            <path d="M43.65 25L57.4 1.2C56.05.4 54.5 0 52.9 0H34.4c-1.6 0-3.15.45-4.5 1.2z" fill="#00832D"/>
+            <path d="M59.8 53.55H27.5L13.75 77.35c1.35.8 2.9 1.2 4.5 1.2h50.8c1.6 0 3.15-.4 4.5-1.2z" fill="#2684FC"/>
+            <path d="M73.4 26.45l-12.65-21.9C59.95 3.1 58.8 2 57.45 1.2L43.7 25l16.15 28h27.45c0-1.55-.4-3.1-1.2-4.5z" fill="#FFBA00"/>
+          </svg>
+          Importa da Google Drive
+        </button>
       </>}
 
       {stage==="preview"&&parsed&&<>
         {/* Summary */}
         <div style={{background:"#0f172a",borderRadius:10,padding:10,marginBottom:12,fontSize:12,color:"#64748b"}}>
-          Separatore rilevato: <code style={{color:"#f59e0b"}}>{parsed.separator === ";" ? "punto e virgola (;)" : "virgola (,)"}</code>
+          Separatore rilevato: <code style={{color:"#f59e0b"}}>{parsed.separatorName}</code>
         </div>
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:16}}>
           <div style={{background:"#14532d",borderRadius:10,padding:12,textAlign:"center"}}>
@@ -682,11 +788,42 @@ function App() {
     }catch(e){notify("❌ Errore importazione: "+e.message,"error");}
   };
 
-  const exportCSV=()=>{
-    const h="data,ora,km attuali,km distanza percorsa,importo,prezzo €/litro,carburante,auto";
-    const rows=refuels.map(r=>`${formatDate(r.datetime)},${formatTime(r.datetime)},${r.km},${r.kmDelta},${r.amount},${r.pricePerLiter},${r.fuelType},"${r.vehicle||""}"`);
-    const blob=new Blob([[h,...rows].join("\n")],{type:"text/csv"});
-    const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="rifornimenti.csv";a.click();
+  const [showExportModal,setShowExportModal]=useState(false);
+
+  const exportCSV=(fmt)=>{
+    // fmt: "standard" | "excel_it" | "gfogli"
+    const n = v => (v===null||v===undefined) ? "" : v;
+    // Excel IT: sep=; decimale=,
+    // Google Fogli / Standard: sep=, decimale=.
+    const isIT = fmt==="excel_it";
+    const isGF = fmt==="gfogli";
+    const sep = isIT ? ";" : ",";
+    const dec = isIT ? (v => n(v).toString().replace(".",",")) : (v => n(v));
+    const q = v => `"${v}"`;
+
+    const cols = ["data","ora","km attuali","km distanza percorsa","importo","prezzo €/litro","carburante","auto"];
+    const header = cols.join(sep);
+    const dataRows = refuels.map(r => [
+      formatDate(r.datetime),
+      formatTime(r.datetime),
+      dec(r.km),
+      dec(r.kmDelta),
+      dec(r.amount),
+      dec(r.pricePerLiter),
+      r.fuelType||"",
+      q(r.vehicle||""),
+    ].join(sep));
+
+    const ext = isIT ? "csv" : "csv";
+    const mime = "text/csv;charset=utf-8;";
+    // BOM per Excel italiano (riconosce UTF-8)
+    const bom = isIT ? "\uFEFF" : "";
+    const blob=new Blob([bom+[header,...dataRows].join("\n")],{type:mime});
+    const a=document.createElement("a");
+    a.href=URL.createObjectURL(blob);
+    a.download=`rifornimenti_${fmt}.csv`;
+    a.click();
+    setShowExportModal(false);
   };
 
   const totalSpent=refuels.reduce((s,r)=>s+(r.amount||0),0);
@@ -757,7 +894,7 @@ function App() {
             </div>
             <div style={{display:"flex",gap:8}}>
               <button onClick={()=>setShowImport(true)} style={{flex:1,background:"#334155",color:"#e2e8f0",border:"none",borderRadius:10,padding:12,cursor:"pointer",fontSize:13,fontWeight:600}}>📥 Importa CSV</button>
-              <button onClick={exportCSV} style={{flex:1,background:"#334155",color:"#e2e8f0",border:"none",borderRadius:10,padding:12,cursor:"pointer",fontSize:13,fontWeight:600}}>📤 Esporta CSV</button>
+              <button onClick={()=>setShowExportModal(true)} style={{flex:1,background:"#334155",color:"#e2e8f0",border:"none",borderRadius:10,padding:12,cursor:"pointer",fontSize:13,fontWeight:600}}>📤 Esporta CSV</button>
             </div>
             <div style={{marginTop:8,fontSize:11,color:"#475569",textAlign:"center"}}>☁️ Dati sincronizzati su Firebase · disponibili su tutti i dispositivi</div>
           </div>
@@ -810,6 +947,22 @@ function App() {
         )}
       </div>
 
+      {showExportModal&&(
+        <Modal onClose={()=>setShowExportModal(false)} title="📤 Esporta CSV">
+          <div style={{fontSize:13,color:"#94a3b8",marginBottom:16}}>Scegli il formato in base a dove vuoi aprire il file:</div>
+          {[
+            {id:"standard", icon:"🌐", label:"Standard / Re-import app", desc:"Virgola (,) separatore · Punto (.) decimale · Compatibile con questa app e la maggior parte dei software"},
+            {id:"excel_it", icon:"📗", label:"Excel italiano", desc:"Punto e virgola (;) separatore · Virgola (,) decimale · BOM UTF-8 incluso · Si apre correttamente in Excel con impostazioni italiane"},
+            {id:"gfogli",   icon:"📊", label:"Google Fogli", desc:"Virgola (,) separatore · Punto (.) decimale · Ottimale per importare in Google Fogli"},
+          ].map(f=>(
+            <button key={f.id} onClick={()=>exportCSV(f.id)}
+              style={{width:"100%",background:"#0f172a",border:"1px solid #334155",borderRadius:12,padding:14,cursor:"pointer",marginBottom:10,textAlign:"left",color:"#e2e8f0"}}>
+              <div style={{fontSize:16,fontWeight:700,marginBottom:4}}>{f.icon} {f.label}</div>
+              <div style={{fontSize:12,color:"#64748b"}}>{f.desc}</div>
+            </button>
+          ))}
+        </Modal>
+      )}
       {showAdd&&<AddRefuelModal vehicle={vehicle} lastKm={lastKm} onSave={async r=>{await handleSaveRefuel(r);setShowAdd(false);}} onClose={()=>setShowAdd(false)}/>}
       {showVehicle&&<VehicleModal onSelect={async v=>{await setVehicle(v);notify(`🚗 Veicolo: ${v.brand} ${v.model}`);setShowVehicle(false);}} onClose={()=>setShowVehicle(false)}/>}
       {showImport&&<ImportModal onImport={handleImport} onClose={()=>setShowImport(false)} existingVehicle={vehicle}/>}
