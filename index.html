@@ -699,7 +699,7 @@ function HistoryTab({refuels, onDelete}){
   const pageItems  = yearRefuels.slice(safePage * PAGE_SIZE, (safePage + 1) * PAGE_SIZE);
 
   const yearSpent = yearRefuels.reduce((s,r)=>s+(r.amount||0),0);
-  const yearKm    = yearRefuels.length>1 ? yearRefuels[yearRefuels.length-1].km - yearRefuels[0].km : 0;
+  const yearKm = yearRefuels.reduce((s,r)=>s+(r.kmDelta>0?r.kmDelta:0),0);
 
   const BtnNav = ({onClick, label, disabled}) => (
     <button onClick={onClick} disabled={disabled} style={{
@@ -834,7 +834,7 @@ function App(){
   const handleSetActive=async id=>{try{await setActive(id);const v=garage.find(x=>x.id===id);if(v)notify(`🚗 ${v.brand} ${v.model} ora attivo`);}catch(e){notify("❌ "+e.message,"error");}};
 
   const tot=refuels.reduce((s,r)=>s+(r.amount||0),0);
-  const totKm=refuels.length>1?refuels[refuels.length-1].km-refuels[0].km:0;
+  const totKm=refuels.reduce((s,r)=>s+(r.kmDelta>0?r.kmDelta:0),0);
   const avgP=refuels.length?refuels.reduce((s,r)=>s+(r.pricePerLiter||0),0)/refuels.length:0;
   const vc=refuels.filter(r=>r.amount&&r.kmDelta&&r.pricePerLiter);
   const avgC=vc.length?vc.reduce((s,r)=>s+r.amount/r.pricePerLiter/r.kmDelta*100,0)/vc.length:0;
