@@ -672,6 +672,118 @@ function StatsTab({refuels}){
   </div>);
 }
 
+// ─── HistoryTab ───────────────────────────────────────────────────────────────
+const PAGE_SIZE = 50;
+
+function HistoryTab({refuels, onDelete}){
+  const years = useMemo(()=>{
+    const s=new Set(refuels.map(r=>new Date(r.datetime||Date.now()).getFullYear()));
+    return [...s].sort((a,b)=>b-a);
+  },[refuels]);
+
+  const [selYear, setSelYear] = useState(null);
+  const [page, setPage] = useState(0);
+
+  const activeYear = selYear ?? (years[0] ?? new Date().getFullYear());
+
+  const pickYear = y => { setSelYear(y); setPage(0); };
+
+  const yearRefuels = useMemo(()=>
+    [...refuels]
+      .filter(r=>new Date(r.datetime||Date.now()).getFullYear()===activeYear)
+      .reverse()
+  ,[refuels, activeYear]);
+
+  const totalPages = Math.max(1, Math.ceil(yearRefuels.length / PAGE_SIZE));
+  const safePage   = Math.min(page, totalPages - 1);
+  const pageItems  = yearRefuels.slice(safePage * PAGE_SIZE, (safePage + 1) * PAGE_SIZE);
+
+  const yearSpent = yearRefuels.reduce((s,r)=>s+(r.amount||0),0);
+  const yearKm    = yearRefuels.length>1 ? yearRefuels[yearRefuels.length-1].km - yearRefuels[0].km : 0;
+
+  const BtnNav = ({onClick, label, disabled}) => (
+    <button onClick={onClick} disabled={disabled} style={{
+      background: disabled?"#1e293b":"#334155", color: disabled?"#475569":"#e2e8f0",
+      border:"none", borderRadius:8, padding:"8px 14px", cursor: disabled?"default":"pointer",
+      fontSize:16, fontWeight:700, minWidth:42, lineHeight:1
+    }}>{label}</button>
+  );
+
+  if(!refuels.length) return <div style={{color:"#64748b",fontSize:13}}>Nessun rifornimento.</div>;
+
+  return(<div>
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+      <div style={{fontWeight:700,fontSize:16}}>📋 Storico <span style={{color:"#64748b",fontSize:13,fontWeight:400}}>({refuels.length} tot.)</span></div>
+    </div>
+
+    {/* Selezione anno */}
+    <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:12}}>
+      {years.map(y=>(
+        <button key={y} onClick={()=>pickYear(y)} style={{
+          background: y===activeYear?"#f59e0b":"#1e293b",
+          color: y===activeYear?"#000":"#e2e8f0",
+          border:"none", borderRadius:20, padding:"6px 16px",
+          cursor:"pointer", fontSize:13, fontWeight:700
+        }}>{y}</button>
+      ))}
+    </div>
+
+    {/* Riepilogo anno */}
+    <div style={{background:"#1e293b",borderRadius:12,padding:"10px 14px",marginBottom:14,display:"flex",gap:20,flexWrap:"wrap"}}>
+      <div style={{fontSize:13}}><span style={{color:"#64748b"}}>Rifornimenti: </span><strong>{yearRefuels.length}</strong></div>
+      <div style={{fontSize:13}}><span style={{color:"#64748b"}}>Spesa: </span><strong style={{color:"#f59e0b"}}>€ {yearSpent.toFixed(2)}</strong></div>
+      {yearKm>0&&<div style={{fontSize:13}}><span style={{color:"#64748b"}}>Km: </span><strong>{yearKm.toLocaleString("it-IT")} km</strong></div>}
+    </div>
+
+    {pageItems.length===0&&<div style={{color:"#64748b",fontSize:13}}>Nessun rifornimento nel {activeYear}.</div>}
+
+    {pageItems.map(r=>(
+      <div key={r.id} style={{background:"#1e293b",borderRadius:12,padding:14,marginBottom:10}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+          <div>
+            <div style={{fontWeight:700,fontSize:15}}>{fmtDate(r.datetime)} {fmtTime(r.datetime)}</div>
+            <div style={{fontSize:12,color:"#94a3b8",marginTop:2}}>{r.fuelType}{r.vehicle?` · ${r.vehicle}`:""}</div>
+          </div>
+          <button onClick={()=>onDelete(r.id)} style={{background:"transparent",border:"none",color:"#ef4444",cursor:"pointer",fontSize:18,padding:0}}>🗑️</button>
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginTop:10}}>
+          {[
+            {l:"Km attuali", v:r.km?`${r.km.toLocaleString("it-IT")} km`:"-"},
+            {l:"Percorsi",   v:r.kmDelta>0?`+${r.kmDelta} km`:"-"},
+            {l:"Importo",    v:`€ ${(r.amount||0).toFixed(2)}`},
+          ].map((x,i)=>(
+            <div key={i} style={{background:"#0f172a",borderRadius:8,padding:8,textAlign:"center"}}>
+              <div style={{fontSize:13,fontWeight:700,color:"#f59e0b"}}>{x.v}</div>
+              <div style={{fontSize:10,color:"#64748b",marginTop:2}}>{x.l}</div>
+            </div>
+          ))}
+        </div>
+        <div style={{marginTop:8,fontSize:12,color:"#94a3b8"}}>€ {(r.pricePerLiter||0).toFixed(3)}/litro</div>
+      </div>
+    ))}
+
+    {/* Paginazione */}
+    {totalPages > 1 && (
+      <div style={{background:"#1e293b",borderRadius:12,padding:"12px 14px",marginTop:4,display:"flex",alignItems:"center",justifyContent:"space-between",gap:6}}>
+        <div style={{display:"flex",gap:6}}>
+          <BtnNav onClick={()=>setPage(0)}              label="⏮" disabled={safePage===0}/>
+          <BtnNav onClick={()=>setPage(p=>p-1)}         label="‹"  disabled={safePage===0}/>
+        </div>
+        <div style={{textAlign:"center"}}>
+          <div style={{fontSize:13,color:"#e2e8f0"}}>Pag. <strong>{safePage+1}</strong> / {totalPages}</div>
+          <div style={{fontSize:11,color:"#64748b",marginTop:2}}>
+            {safePage*PAGE_SIZE+1}–{Math.min((safePage+1)*PAGE_SIZE, yearRefuels.length)} di {yearRefuels.length}
+          </div>
+        </div>
+        <div style={{display:"flex",gap:6}}>
+          <BtnNav onClick={()=>setPage(p=>p+1)}         label="›"  disabled={safePage===totalPages-1}/>
+          <BtnNav onClick={()=>setPage(totalPages-1)}   label="⏭" disabled={safePage===totalPages-1}/>
+        </div>
+      </div>
+    )}
+  </div>);
+}
+
 // ─── ResetConfirmModal ────────────────────────────────────────────────────────
 function ResetConfirmModal({count,onConfirm,onClose}){
   const [busy,setBusy]=useState(false);
@@ -798,30 +910,7 @@ function App(){
       {tab==="stats"&&<StatsTab refuels={refuels}/>}
 
       {/* ── STORICO ── */}
-      {tab==="history"&&<>
-        <div style={{fontWeight:700,marginBottom:12}}>📋 Storico ({refuels.length})</div>
-        {!refuels.length&&<div style={{color:"#64748b",fontSize:13}}>Nessun rifornimento.</div>}
-        {[...refuels].reverse().map(r=>(
-          <div key={r.id} style={{background:"#1e293b",borderRadius:12,padding:14,marginBottom:10}}>
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
-              <div>
-                <div style={{fontWeight:700,fontSize:15}}>{fmtDate(r.datetime)} {fmtTime(r.datetime)}</div>
-                <div style={{fontSize:12,color:"#94a3b8",marginTop:2}}>{r.fuelType}{r.vehicle?` · ${r.vehicle}`:""}</div>
-              </div>
-              <button onClick={()=>handleDelete(r.id)} style={{background:"transparent",border:"none",color:"#ef4444",cursor:"pointer",fontSize:18,padding:0}}>🗑️</button>
-            </div>
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginTop:10}}>
-              {[{l:"Km attuali",v:r.km?`${r.km.toLocaleString("it-IT")} km`:"-"},{l:"Percorsi",v:r.kmDelta>0?`+${r.kmDelta} km`:"-"},{l:"Importo",v:`€ ${(r.amount||0).toFixed(2)}`}].map((x,i)=>(
-                <div key={i} style={{background:"#0f172a",borderRadius:8,padding:8,textAlign:"center"}}>
-                  <div style={{fontSize:13,fontWeight:700,color:"#f59e0b"}}>{x.v}</div>
-                  <div style={{fontSize:10,color:"#64748b",marginTop:2}}>{x.l}</div>
-                </div>
-              ))}
-            </div>
-            <div style={{marginTop:8,fontSize:12,color:"#94a3b8"}}>€ {(r.pricePerLiter||0).toFixed(3)}/litro</div>
-          </div>
-        ))}
-      </>}
+      {tab==="history"&&<HistoryTab refuels={refuels} onDelete={handleDelete}/>}
 
       {/* ── GARAGE ── */}
       {tab==="garage"&&<>
