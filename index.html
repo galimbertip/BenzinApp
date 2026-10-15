@@ -97,6 +97,20 @@ const fmtDate = d => d ? new Date(d).toLocaleDateString("it-IT") : "";
 const fmtTime = d => d ? new Date(d).toLocaleTimeString("it-IT",{hour:"2-digit",minute:"2-digit"}) : "";
 const nowISO  = () => new Date().toISOString();
 
+// Risolve l'id veicolo di un rifornimento: usa vehicleId se presente (rifornimenti nuovi),
+// altrimenti matcha il testo libero "vehicle" con un veicolo del garage (CSV / dati vecchi).
+function resolveVehicleId(r, garage){
+  if(r.vehicleId) return r.vehicleId;
+  if(!r.vehicle) return null;
+  const m=(garage||[]).find(v=>`${v.brand} ${v.model}`.toLowerCase()===(r.vehicle||"").toLowerCase());
+  return m?m.id:null;
+}
+function belongsToVehicle(r, veh){
+  if(!veh) return false;
+  if(r.vehicleId) return r.vehicleId===veh.id;
+  return (r.vehicle||"").toLowerCase()===`${veh.brand} ${veh.model}`.toLowerCase();
+}
+
 function parseNum(raw) {
   if (!raw || !raw.trim()) return null;
   let s = raw.trim().replace(/[€$£\s]/g,"");
@@ -175,11 +189,16 @@ function parseCSV(text) {
     if(warn.length) warnings.push({line:i+1,warnings:warn});
   }
 
-  for(let i=1;i<rows.length;i++){
-    if(!rows[i].kmDelta&&rows[i].km&&rows[i-1].km){
-      const d=rows[i].km-rows[i-1].km;
+  // km percorsi mancanti: confronta solo rifornimenti dello stesso veicolo (colonna "auto"),
+  // altrimenti cambiare auto a metà CSV genererebbe km percorsi assurdi
+  const lastKmByVehicle={};
+  for(let i=0;i<rows.length;i++){
+    const key=rows[i]._vRaw||"";
+    if(!rows[i].kmDelta&&rows[i].km!=null&&lastKmByVehicle[key]!=null){
+      const d=rows[i].km-lastKmByVehicle[key];
       if(d>0) rows[i].kmDelta=d;
     }
+    if(rows[i].km!=null) lastKmByVehicle[key]=rows[i].km;
   }
   return {rows,warnings,sepName};
 }
@@ -345,18 +364,47 @@ function Modal({title,onClose,children}){
 const INP={background:"var(--surface-2)",color:"var(--text)",border:"1px solid var(--border)",borderRadius:12,padding:"11px 13px",width:"100%",fontSize:15,boxSizing:"border-box"};
 const INP_SM={...INP,fontSize:13,padding:"9px 12px",borderRadius:10};
 
+// ─── GPverse brand credit ──────────────────────────────────────────────────────
+const GPVERSE_LOGO="data:image/png;base64,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";
+function GPverseFooter(){
+  return(
+    <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:6,marginTop:14,opacity:.6}}>
+      <img src={GPVERSE_LOGO} alt="GPverse" style={{width:16,height:16,borderRadius:4}}/>
+      <span style={{fontSize:10,color:"var(--text-faint)",letterSpacing:".3px"}}>Un progetto GPverse</span>
+    </div>
+  );
+}
+
 // ─── AddRefuelModal ───────────────────────────────────────────────────────────
-function AddRefuelModal({vehicle,lastKm,onSave,onClose}){
+function AddRefuelModal({garage,activeId,refuels,onSave,onClose}){
+  const [vehicleId,setVehicleId]=useState(activeId||(garage[0]&&garage[0].id)||"");
+  const vehicle=garage.find(v=>v.id===vehicleId)||null;
   const [fuelType,setFuelType]=useState(vehicle?.fuel&&FUEL_TYPES.includes(vehicle.fuel)?vehicle.fuel:FUEL_TYPES[0]);
   const [km,setKm]=useState(""); const [amount,setAmount]=useState(""); const [price,setPrice]=useState("");
   const [saving,setSaving]=useState(false);
+
+  const changeVehicle=id=>{
+    setVehicleId(id);
+    const v=garage.find(x=>x.id===id);
+    if(v?.fuel&&FUEL_TYPES.includes(v.fuel)) setFuelType(v.fuel);
+  };
+
+  // km dell'ultimo rifornimento SOLO per il veicolo selezionato: cambiare veicolo qui
+  // non deve mai calcolare i km percorsi rispetto a un'altra auto
+  const lastKm=useMemo(()=>{
+    if(!vehicle) return 0;
+    const own=refuels.filter(r=>belongsToVehicle(r,vehicle));
+    return own.length?(own[own.length-1].km||0):0;
+  },[refuels,vehicle]);
+
   const delta=km&&lastKm?Math.max(0,parseFloat(km)-lastKm):0;
 
   const save=async()=>{
+    if(!vehicle){alert("Aggiungi prima un veicolo nel Garage");return;}
     if(!km||!amount||!price){alert("Compila tutti i campi (*)");return;}
-    if(parseFloat(km)<(lastKm||0)&&!confirm(`Km inseriti (${km}) < ultimi registrati (${lastKm}). Continuare?`)) return;
+    if(parseFloat(km)<(lastKm||0)&&!confirm(`Km inseriti (${km}) < ultimi registrati per questo veicolo (${lastKm}). Continuare?`)) return;
     setSaving(true);
-    await onSave({id:crypto.randomUUID(),datetime:nowISO(),fuelType,km:parseFloat(km),kmDelta:delta,amount:parseFloat(amount),pricePerLiter:parseFloat(price),vehicle:vehicle?`${vehicle.brand} ${vehicle.model}`:""});
+    await onSave({id:crypto.randomUUID(),datetime:nowISO(),fuelType,km:parseFloat(km),kmDelta:delta,amount:parseFloat(amount),pricePerLiter:parseFloat(price),vehicleId:vehicle.id,vehicle:`${vehicle.brand} ${vehicle.model}`});
     setSaving(false);
   };
 
@@ -366,17 +414,23 @@ function AddRefuelModal({vehicle,lastKm,onSave,onClose}){
         <div style={{fontSize:12,color:"var(--text-dim)",marginBottom:4}}>📅 Data e ora</div>
         <div style={{...INP,color:"var(--text-faint)",fontSize:14}}>{new Date().toLocaleString("it-IT")} (automatico)</div>
       </div>
-      {vehicle&&<div style={{marginBottom:12}}>
-        <div style={{fontSize:12,color:"var(--text-dim)",marginBottom:4}}>🚗 Veicolo attivo</div>
-        <div style={{...INP,color:"var(--amber)",fontSize:14,fontWeight:600}}>{vehicle.brand} {vehicle.model}{vehicle.targa?` · ${vehicle.targa}`:""}</div>
-      </div>}
+      <div style={{marginBottom:12}}>
+        <div style={{fontSize:12,color:"var(--text-dim)",marginBottom:4}}>🚗 Veicolo{vehicleId&&vehicleId!==activeId?" (diverso dal predefinito)":""}</div>
+        {garage.length?(
+          <select value={vehicleId} onChange={e=>changeVehicle(e.target.value)} style={INP}>
+            {garage.map(v=><option key={v.id} value={v.id}>{v.brand} {v.model}{v.id===activeId?" · predefinito":""}{v.targa?` · ${v.targa}`:""}</option>)}
+          </select>
+        ):(
+          <div style={{...INP,color:"var(--text-faint)",fontSize:13}}>Nessun veicolo — aggiungine uno nel Garage</div>
+        )}
+      </div>
       <div style={{marginBottom:12}}>
         <div style={{fontSize:12,color:"var(--text-dim)",marginBottom:4}}>⛽ Tipo carburante</div>
         <select value={fuelType} onChange={e=>setFuelType(e.target.value)} style={INP}>{FUEL_TYPES.map(f=><option key={f}>{f}</option>)}</select>
       </div>
       <div style={{marginBottom:12}}>
         <div style={{fontSize:12,color:"var(--text-dim)",marginBottom:4}}>🛣️ Km attuali *</div>
-        <input type="number" value={km} onChange={e=>setKm(e.target.value)} placeholder={lastKm?`Ultimo: ${lastKm.toLocaleString("it-IT")} km`:"es. 45230"} style={INP}/>
+        <input type="number" value={km} onChange={e=>setKm(e.target.value)} placeholder={lastKm?`Ultimo per questo veicolo: ${lastKm.toLocaleString("it-IT")} km`:"es. 45230"} style={INP}/>
         {delta>0&&<div style={{fontSize:12,color:"#22d3ee",marginTop:4}}>📍 Percorsi dall'ultimo: {delta.toLocaleString("it-IT")} km</div>}
       </div>
       <div style={{marginBottom:12}}>
@@ -685,26 +739,74 @@ function ExportModal({refuels,onClose}){
 }
 
 // ─── StatsTab ─────────────────────────────────────────────────────────────────
-function StatsTab({refuels}){
+function StatsTab({refuels, garage}){
   const [view,setView]=useState("km_year"); const [selY,setSelY]=useState(null);
-  const years=useMemo(()=>[...new Set(refuels.map(r=>new Date(r.datetime||Date.now()).getFullYear()))].sort(),[refuels]);
+  const [vehFilter,setVehFilter]=useState("all");
+
+  // un veicolo alla volta: sommare km/consumo di auto diverse non ha senso,
+  // la spesa in € invece resta valida sommata su "Tutti i veicoli"
+  const filtered=useMemo(()=>{
+    if(vehFilter==="all") return refuels;
+    return refuels.filter(r=>resolveVehicleId(r,garage)===vehFilter);
+  },[refuels,garage,vehFilter]);
+
+  const years=useMemo(()=>[...new Set(filtered.map(r=>new Date(r.datetime||Date.now()).getFullYear()))].sort(),[filtered]);
   const yr=selY||(years.length?years[years.length-1]:new Date().getFullYear());
   const byYr=r=>new Date(r.datetime||Date.now()).getFullYear()===yr;
 
-  const kmByYear=useMemo(()=>{const m={};refuels.forEach(r=>{const y=new Date(r.datetime||Date.now()).getFullYear();if(!m[y])m[y]={min:Infinity,max:-Infinity};if(r.km){m[y].min=Math.min(m[y].min,r.km);m[y].max=Math.max(m[y].max,r.km);}});return Object.entries(m).map(([y,v])=>({label:y,value:v.max===-Infinity?0:v.max-(v.min===Infinity?0:v.min)})).sort((a,b)=>a.label-b.label);},[refuels]);
-  const kmByMonth=useMemo(()=>{const m={};refuels.filter(byYr).forEach(r=>{if(r.kmDelta){const mo=new Date(r.datetime).getMonth();m[mo]=(m[mo]||0)+r.kmDelta;}});return MONTHS_IT.map((l,i)=>({label:l,value:m[i]||0}));},[refuels,yr]);
-  const priceMonth=useMemo(()=>{const m={};refuels.filter(byYr).forEach(r=>{if(r.pricePerLiter){const mo=new Date(r.datetime).getMonth();(m[mo]=m[mo]||[]).push(r.pricePerLiter);}});return MONTHS_IT.map((l,i)=>({label:l,value:m[i]?m[i].reduce((s,v)=>s+v,0)/m[i].length:0}));},[refuels,yr]);
-  const priceYear=useMemo(()=>{const m={};refuels.forEach(r=>{if(r.pricePerLiter){const y=new Date(r.datetime||Date.now()).getFullYear();(m[y]=m[y]||[]).push(r.pricePerLiter);}});return Object.entries(m).map(([y,a])=>({label:y,value:a.reduce((s,v)=>s+v,0)/a.length})).sort((a,b)=>a.label-b.label);},[refuels]);
-  const spesaMonth=useMemo(()=>{const m={};refuels.filter(byYr).forEach(r=>{if(r.amount){const mo=new Date(r.datetime).getMonth();m[mo]=(m[mo]||0)+r.amount;}});return MONTHS_IT.map((l,i)=>({label:l,value:m[i]||0}));},[refuels,yr]);
-  const spesaYear=useMemo(()=>{const m={};refuels.forEach(r=>{if(r.amount){const y=new Date(r.datetime||Date.now()).getFullYear();m[y]=(m[y]||0)+r.amount;}});return Object.entries(m).map(([y,v])=>({label:y,value:v})).sort((a,b)=>a.label-b.label);},[refuels]);
-  const consumoMonth=useMemo(()=>{const m={};refuels.filter(byYr).forEach(r=>{if(r.amount&&r.kmDelta&&r.pricePerLiter){const mo=new Date(r.datetime).getMonth();(m[mo]=m[mo]||[]).push(r.amount/r.pricePerLiter/r.kmDelta*100);}});return MONTHS_IT.map((l,i)=>({label:l,value:m[i]?m[i].reduce((s,v)=>s+v,0)/m[i].length:0}));},[refuels,yr]);
+  const kmByYear=useMemo(()=>{const m={};filtered.forEach(r=>{if(r.kmDelta>0){const y=new Date(r.datetime||Date.now()).getFullYear();m[y]=(m[y]||0)+r.kmDelta;}});return Object.entries(m).map(([y,v])=>({label:y,value:v})).sort((a,b)=>a.label-b.label);},[filtered]);
+  const kmByMonth=useMemo(()=>{const m={};filtered.filter(byYr).forEach(r=>{if(r.kmDelta){const mo=new Date(r.datetime).getMonth();m[mo]=(m[mo]||0)+r.kmDelta;}});return MONTHS_IT.map((l,i)=>({label:l,value:m[i]||0}));},[filtered,yr]);
+  const priceMonth=useMemo(()=>{const m={};filtered.filter(byYr).forEach(r=>{if(r.pricePerLiter){const mo=new Date(r.datetime).getMonth();(m[mo]=m[mo]||[]).push(r.pricePerLiter);}});return MONTHS_IT.map((l,i)=>({label:l,value:m[i]?m[i].reduce((s,v)=>s+v,0)/m[i].length:0}));},[filtered,yr]);
+  const priceYear=useMemo(()=>{const m={};filtered.forEach(r=>{if(r.pricePerLiter){const y=new Date(r.datetime||Date.now()).getFullYear();(m[y]=m[y]||[]).push(r.pricePerLiter);}});return Object.entries(m).map(([y,a])=>({label:y,value:a.reduce((s,v)=>s+v,0)/a.length})).sort((a,b)=>a.label-b.label);},[filtered]);
+  const spesaMonth=useMemo(()=>{const m={};filtered.filter(byYr).forEach(r=>{if(r.amount){const mo=new Date(r.datetime).getMonth();m[mo]=(m[mo]||0)+r.amount;}});return MONTHS_IT.map((l,i)=>({label:l,value:m[i]||0}));},[filtered,yr]);
+  const spesaYear=useMemo(()=>{const m={};filtered.forEach(r=>{if(r.amount){const y=new Date(r.datetime||Date.now()).getFullYear();m[y]=(m[y]||0)+r.amount;}});return Object.entries(m).map(([y,v])=>({label:y,value:v})).sort((a,b)=>a.label-b.label);},[filtered]);
+  const consumoMonth=useMemo(()=>{const m={};filtered.filter(byYr).forEach(r=>{if(r.amount&&r.kmDelta&&r.pricePerLiter){const mo=new Date(r.datetime).getMonth();(m[mo]=m[mo]||[]).push(r.amount/r.pricePerLiter/r.kmDelta*100);}});return MONTHS_IT.map((l,i)=>({label:l,value:m[i]?m[i].reduce((s,v)=>s+v,0)/m[i].length:0}));},[filtered,yr]);
+  const costKmMonth=useMemo(()=>{const m={};filtered.filter(byYr).forEach(r=>{if(r.amount&&r.kmDelta>0){const mo=new Date(r.datetime).getMonth();(m[mo]=m[mo]||[]).push(r.amount/r.kmDelta);}});return MONTHS_IT.map((l,i)=>({label:l,value:m[i]?m[i].reduce((s,v)=>s+v,0)/m[i].length:0}));},[filtered,yr]);
 
-  const VIEWS=[{id:"km_year",l:"🛣️ Km/Anno"},{id:"km_month",l:"📅 Km/Mese"},{id:"price_month",l:"💶 Prezzo/Mese"},{id:"price_year",l:"📈 Prezzo/Anno"},{id:"spesa_month",l:"🧾 Spesa/Mese"},{id:"spesa_year",l:"🧾 Spesa/Anno"},{id:"consumo",l:"⚡ Consumo"}];
-  const needsYear=["km_month","price_month","spesa_month","consumo"].includes(view);
+  // confronto mese corrente vs precedente: usa gli ultimi due mesi con dati, indipendente dall'anno selezionato
+  const monthCompare=useMemo(()=>{
+    const m={};
+    filtered.forEach(r=>{
+      const d=new Date(r.datetime||Date.now());
+      const key=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}`;
+      if(!m[key]) m[key]={label:`${MONTHS_IT[d.getMonth()]} ${d.getFullYear()}`,spesa:0,km:0,prices:[]};
+      m[key].spesa+=r.amount||0;
+      if(r.kmDelta>0) m[key].km+=r.kmDelta;
+      if(r.pricePerLiter) m[key].prices.push(r.pricePerLiter);
+    });
+    const keys=Object.keys(m).sort();
+    const pack=k=>{ if(!k) return null; const b=m[k]; return {label:b.label,spesa:b.spesa,km:b.km,price:b.prices.length?b.prices.reduce((s,v)=>s+v,0)/b.prices.length:null,costKm:b.km>0?b.spesa/b.km:null}; };
+    return {cur:pack(keys[keys.length-1]),prev:pack(keys[keys.length-2])};
+  },[filtered]);
+
+  const priceRecords=useMemo(()=>{
+    const withPrice=filtered.filter(r=>r.pricePerLiter);
+    if(!withPrice.length) return null;
+    const min=withPrice.reduce((a,b)=>b.pricePerLiter<a.pricePerLiter?b:a);
+    const max=withPrice.reduce((a,b)=>b.pricePerLiter>a.pricePerLiter?b:a);
+    return {min,max};
+  },[filtered]);
+
+  const VIEWS=[{id:"km_year",l:"🛣️ Km/Anno"},{id:"km_month",l:"📅 Km/Mese"},{id:"price_month",l:"💶 Prezzo/Mese"},{id:"price_year",l:"📈 Prezzo/Anno"},{id:"spesa_month",l:"🧾 Spesa/Mese"},{id:"spesa_year",l:"🧾 Spesa/Anno"},{id:"consumo",l:"⚡ Consumo"},{id:"costkm",l:"💰 Costo/Km"},{id:"confronto",l:"📊 Confronto mese"}];
+  const needsYear=["km_month","price_month","spesa_month","consumo","costkm"].includes(view);
+
+  const Delta=({cur,prev,invert})=>{
+    if(cur==null||prev==null||prev===0) return null;
+    const pct=(cur-prev)/prev*100;
+    const up=pct>=0;
+    const color=Math.abs(pct)<0.5?"var(--text-faint)":(invert?(up?"var(--red)":"var(--green)"):"var(--text-dim)");
+    return <span style={{color,fontWeight:700,fontSize:12}}>{up?"▲":"▼"} {Math.abs(pct).toFixed(1)}%</span>;
+  };
 
   if(!refuels.length) return <div style={{textAlign:"center",color:"var(--text-faint)",padding:40}}><div style={{fontSize:48}}>📊</div><div style={{marginTop:12}}>Aggiungi rifornimenti per le statistiche!</div></div>;
 
   return(<div>
+    {garage.length>1&&<div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:10}}>
+      <button onClick={()=>setVehFilter("all")} style={{background:vehFilter==="all"?"var(--blue)":"var(--surface)",color:"#fff",border:"none",borderRadius:20,padding:"5px 12px",cursor:"pointer",fontSize:12,fontWeight:vehFilter==="all"?700:400}}>🚘 Tutti i veicoli</button>
+      {garage.map(v=><button key={v.id} onClick={()=>setVehFilter(v.id)} style={{background:vehFilter===v.id?"var(--blue)":"var(--surface)",color:"#fff",border:"none",borderRadius:20,padding:"5px 12px",cursor:"pointer",fontSize:12,fontWeight:vehFilter===v.id?700:400}}>{v.brand} {v.model}</button>)}
+    </div>}
+    {vehFilter==="all"&&garage.length>1&&["km_year","km_month","consumo","costkm"].includes(view)&&
+      <div style={{fontSize:11,color:"var(--text-faint)",marginBottom:10,marginTop:-4}}>ℹ️ Km/consumo sommati su tutti i veicoli: seleziona un'auto sopra per un dato preciso</div>}
     <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:12}}>
       {VIEWS.map(v=><button key={v.id} onClick={()=>setView(v.id)} style={{background:view===v.id?"var(--violet)":"var(--surface)",color:"#e2e8f0",border:"none",borderRadius:20,padding:"6px 12px",cursor:"pointer",fontSize:12,fontWeight:view===v.id?700:400}}>{v.l}</button>)}
     </div>
@@ -716,17 +818,40 @@ function StatsTab({refuels}){
     {view==="spesa_month"&&<StatCard title={`🧾 Spesa/mese — ${yr}`} sub="Importo mensile"><BarChart data={spesaMonth} color="#ec4899" fmt={v=>v>0?`€${v.toFixed(0)}`:"–"}/><StatTable rows={spesaMonth.filter(d=>d.value>0).map(d=>({Mese:d.label,Spesa:`€ ${d.value.toFixed(2)}`}))}/></StatCard>}
     {view==="spesa_year"&&<StatCard title="🧾 Spesa/anno" sub="Spesa totale per anno"><BarChart data={spesaYear} color="#ec4899" fmt={v=>`€${v.toFixed(0)}`}/><StatTable rows={spesaYear.map(d=>({Anno:d.label,Spesa:`€ ${d.value.toFixed(2)}`}))}/></StatCard>}
     {view==="consumo"&&<StatCard title={`⚡ Consumo/mese — ${yr}`} sub="L/100km per mese"><LineChart data={consumoMonth} color="#22d3ee"/><StatTable rows={consumoMonth.filter(d=>d.value>0).map(d=>({Mese:d.label,"L/100km":`${d.value.toFixed(2)} L`}))}/></StatCard>}
+    {view==="costkm"&&<StatCard title={`💰 Costo/km — ${yr}`} sub="Prezzo × consumo: quanto ti costa ogni km percorso"><LineChart data={costKmMonth} color="var(--red)"/><StatTable rows={costKmMonth.filter(d=>d.value>0).map(d=>({Mese:d.label,"€/km":`€ ${d.value.toFixed(3)}`}))}/></StatCard>}
+    {view==="confronto"&&<StatCard title="📊 Confronto mese su mese" sub={monthCompare.cur&&monthCompare.prev?`${monthCompare.prev.label} → ${monthCompare.cur.label}`:"Servono almeno due mesi di dati"}>
+      {monthCompare.cur&&monthCompare.prev?(
+        <div style={{display:"grid",gridTemplateColumns:"1fr auto auto",gap:"10px 12px",alignItems:"center",marginTop:6,fontSize:13}}>
+          <div></div>
+          <div style={{color:"var(--text-faint)",fontSize:11,textAlign:"right"}}>{monthCompare.prev.label}</div>
+          <div style={{color:"var(--text-faint)",fontSize:11,textAlign:"right"}}>{monthCompare.cur.label}</div>
+          <div>🧾 Spesa</div><div style={{textAlign:"right",color:"var(--text-dim)"}}>€ {monthCompare.prev.spesa.toFixed(2)}</div><div style={{textAlign:"right",fontWeight:700}}>€ {monthCompare.cur.spesa.toFixed(2)} <Delta cur={monthCompare.cur.spesa} prev={monthCompare.prev.spesa} invert/></div>
+          <div>🛣️ Km</div><div style={{textAlign:"right",color:"var(--text-dim)"}}>{monthCompare.prev.km.toLocaleString("it-IT")} km</div><div style={{textAlign:"right",fontWeight:700}}>{monthCompare.cur.km.toLocaleString("it-IT")} km <Delta cur={monthCompare.cur.km} prev={monthCompare.prev.km}/></div>
+          <div>⛽ Prezzo/L</div><div style={{textAlign:"right",color:"var(--text-dim)"}}>{monthCompare.prev.price?`€ ${monthCompare.prev.price.toFixed(3)}`:"–"}</div><div style={{textAlign:"right",fontWeight:700}}>{monthCompare.cur.price?`€ ${monthCompare.cur.price.toFixed(3)}`:"–"} <Delta cur={monthCompare.cur.price} prev={monthCompare.prev.price} invert/></div>
+          <div>💰 Costo/km</div><div style={{textAlign:"right",color:"var(--text-dim)"}}>{monthCompare.prev.costKm?`€ ${monthCompare.prev.costKm.toFixed(3)}`:"–"}</div><div style={{textAlign:"right",fontWeight:700}}>{monthCompare.cur.costKm?`€ ${monthCompare.cur.costKm.toFixed(3)}`:"–"} <Delta cur={monthCompare.cur.costKm} prev={monthCompare.prev.costKm} invert/></div>
+        </div>
+      ):(<div style={{fontSize:12,color:"var(--text-faint)",marginTop:8}}>Registra rifornimenti in almeno due mesi diversi per vedere il confronto.</div>)}
+      {priceRecords&&<div style={{marginTop:16,paddingTop:12,borderTop:"1px solid var(--border)",fontSize:12,color:"var(--text-dim)"}}>
+        🏆 Prezzo più basso: <strong style={{color:"var(--green)"}}>€ {priceRecords.min.pricePerLiter.toFixed(3)}</strong> il {fmtDate(priceRecords.min.datetime)} · più alto: <strong style={{color:"var(--red)"}}>€ {priceRecords.max.pricePerLiter.toFixed(3)}</strong> il {fmtDate(priceRecords.max.datetime)}
+      </div>}
+    </StatCard>}
   </div>);
 }
 
 // ─── HistoryTab ───────────────────────────────────────────────────────────────
 const PAGE_SIZE = 50;
 
-function HistoryTab({refuels, onDelete}){
+function HistoryTab({refuels, garage, onDelete}){
+  const [vehFilter, setVehFilter] = useState("all");
+  const filtered = useMemo(()=>{
+    if(vehFilter==="all") return refuels;
+    return refuels.filter(r=>resolveVehicleId(r,garage)===vehFilter);
+  },[refuels, garage, vehFilter]);
+
   const years = useMemo(()=>{
-    const s=new Set(refuels.map(r=>new Date(r.datetime||Date.now()).getFullYear()));
+    const s=new Set(filtered.map(r=>new Date(r.datetime||Date.now()).getFullYear()));
     return [...s].sort((a,b)=>b-a);
-  },[refuels]);
+  },[filtered]);
 
   const [selYear, setSelYear] = useState(null);
   const [page, setPage] = useState(0);
@@ -736,10 +861,10 @@ function HistoryTab({refuels, onDelete}){
   const pickYear = y => { setSelYear(y); setPage(0); };
 
   const yearRefuels = useMemo(()=>
-    [...refuels]
+    [...filtered]
       .filter(r=>new Date(r.datetime||Date.now()).getFullYear()===activeYear)
       .reverse()
-  ,[refuels, activeYear]);
+  ,[filtered, activeYear]);
 
   const totalPages = Math.max(1, Math.ceil(yearRefuels.length / PAGE_SIZE));
   const safePage   = Math.min(page, totalPages - 1);
@@ -760,8 +885,13 @@ function HistoryTab({refuels, onDelete}){
 
   return(<div>
     <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
-      <div style={{fontWeight:700,fontSize:16}}>📋 Storico <span style={{color:"var(--text-faint)",fontSize:13,fontWeight:400}}>({refuels.length} tot.)</span></div>
+      <div style={{fontWeight:700,fontSize:16}}>📋 Storico <span style={{color:"var(--text-faint)",fontSize:13,fontWeight:400}}>({filtered.length} tot.)</span></div>
     </div>
+
+    {garage.length>1&&<div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:12}}>
+      <button onClick={()=>setVehFilter("all")} style={{background:vehFilter==="all"?"var(--blue)":"var(--surface)",color:"#fff",border:"none",borderRadius:20,padding:"5px 12px",cursor:"pointer",fontSize:12,fontWeight:vehFilter==="all"?700:400}}>🚘 Tutti i veicoli</button>
+      {garage.map(v=><button key={v.id} onClick={()=>setVehFilter(v.id)} style={{background:vehFilter===v.id?"var(--blue)":"var(--surface)",color:"#fff",border:"none",borderRadius:20,padding:"5px 12px",cursor:"pointer",fontSize:12,fontWeight:vehFilter===v.id?700:400}}>{v.brand} {v.model}</button>)}
+    </div>}
 
     {/* Selezione anno */}
     <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:12}}>
@@ -874,7 +1004,7 @@ function App(){
 
   const handleSave=async r=>{try{await fbSave(fs,r);notify("✅ Salvato!");}catch(e){notify("❌ Errore: "+e.message,"error");}};
   const handleDelete=async id=>{if(!confirm("Eliminare?"))return;try{await fbDelete(fs,id);notify("Eliminato","error");}catch(e){notify("❌ "+e.message,"error");}};
-  const handleImport=async rows=>{try{for(const r of rows)await fbSave(fs,r);notify(`✅ ${rows.length} righe importate!`);setShowImport(false);}catch(e){notify("❌ "+e.message,"error");}};
+  const handleImport=async rows=>{try{const withIds=rows.map(r=>({...r,vehicleId:resolveVehicleId(r,garage)}));for(const r of withIds)await fbSave(fs,r);notify(`✅ ${rows.length} righe importate!`);setShowImport(false);}catch(e){notify("❌ "+e.message,"error");}};
   const handleReset=async()=>{try{await fbDeleteAll(fs);notify("🗑️ Tutti i rifornimenti eliminati","error");setShowReset(false);}catch(e){notify("❌ "+e.message,"error");}};
   const handleAddVehicle=async v=>{try{const nv=await addVehicle(v);notify(`🚗 ${v.brand} ${v.model} aggiunto!`);setShowAddVehicle(false);}catch(e){notify("❌ "+e.message,"error");}};
   const handleRemoveVehicle=async id=>{if(!confirm("Rimuovere questo veicolo dal garage?"))return;try{await removeVehicle(id);notify("Veicolo rimosso","error");}catch(e){notify("❌ "+e.message,"error");}};
@@ -885,7 +1015,14 @@ function App(){
   const avgP=refuels.length?refuels.reduce((s,r)=>s+(r.pricePerLiter||0),0)/refuels.length:0;
   const vc=refuels.filter(r=>r.amount&&r.kmDelta&&r.pricePerLiter);
   const avgC=vc.length?vc.reduce((s,r)=>s+r.amount/r.pricePerLiter/r.kmDelta*100,0)/vc.length:0;
-  const lastKm=refuels.length?refuels[refuels.length-1].km:0;
+
+  // ultimo prezzo pagato vs media storica — per avere subito sott'occhio l'effetto
+  // dei recenti aumenti del prezzo della benzina
+  const pricedRefuels=refuels.filter(r=>r.pricePerLiter);
+  const lastPrice=pricedRefuels.length?pricedRefuels[pricedRefuels.length-1].pricePerLiter:null;
+  const priorPriced=pricedRefuels.slice(0,-1);
+  const priorAvgPrice=priorPriced.length?priorPriced.reduce((s,r)=>s+r.pricePerLiter,0)/priorPriced.length:null;
+  const priceTrendPct=(lastPrice!=null&&priorAvgPrice)?((lastPrice-priorAvgPrice)/priorAvgPrice*100):null;
 
   const TABS=[
     {id:"dashboard",e:"📊",t:"Dashboard"},
@@ -929,11 +1066,19 @@ function App(){
       {/* ── DASHBOARD ── */}
       {tab==="dashboard"&&<>
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:16}}>
-          {[{l:"Totale speso",v:`€ ${tot.toFixed(2)}`,i:"💶",c:"#3b6ef0"},{l:"Km percorsi",v:`${(totKm||0).toFixed(0)} km`,i:"🛣️",c:"#22d3ee"},{l:"Prezzo medio",v:`€ ${avgP.toFixed(3)}/L`,i:"📈",c:"#f5a623"},{l:"Consumo medio",v:avgC>0?`${avgC.toFixed(1)} L/100km`:"N/D",i:"⚡",c:"#34d399"}].map((s,i)=>(
+          {[
+            {l:"Totale speso",v:`€ ${tot.toFixed(2)}`,i:"💶",c:"#3b6ef0"},
+            {l:"Km percorsi",v:`${(totKm||0).toFixed(0)} km`,i:"🛣️",c:"#22d3ee"},
+            {l:"Prezzo medio",v:`€ ${avgP.toFixed(3)}/L`,i:"📈",c:"#f5a623",
+              sub:priceTrendPct!=null?`${priceTrendPct>=0?"▲":"▼"} ${Math.abs(priceTrendPct).toFixed(1)}% vs storico`:null,
+              subColor:priceTrendPct!=null?(priceTrendPct>=0?"var(--red)":"var(--green)"):null},
+            {l:"Consumo medio",v:avgC>0?`${avgC.toFixed(1)} L/100km`:"N/D",i:"⚡",c:"#34d399"},
+          ].map((s,i)=>(
             <div key={i} className="card-hover fade-in" style={{background:"var(--surface)",border:"1px solid var(--border)",borderRadius:"var(--radius-lg)",padding:16,boxShadow:"var(--shadow-card)"}}>
               <div style={{width:38,height:38,borderRadius:12,background:s.c+"29",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18}}>{s.i}</div>
               <div style={{fontSize:19,fontWeight:800,marginTop:10,letterSpacing:"-.2px"}}>{s.v}</div>
               <div style={{fontSize:11,color:"var(--text-dim)",marginTop:2}}>{s.l}</div>
+              {s.sub&&<div style={{fontSize:10,marginTop:4,color:s.subColor,fontWeight:700}}>{s.sub}</div>}
             </div>
           ))}
         </div>
@@ -953,14 +1098,15 @@ function App(){
             </div>
           ))}
         </div>
-        <div style={{marginTop:4,fontSize:11,color:"#475569",textAlign:"center"}}>☁️ Sincronizzato su Firebase</div>
+        <div style={{marginTop:4,fontSize:11,color:"#475569",textAlign:"center"}}>☁️ Sincronizzato su Firebase{garage.length>1?" · dati di tutti i veicoli — dettaglio per veicolo in Statistiche":""}</div>
+        <GPverseFooter/>
       </>}
 
       {/* ── STATISTICHE ── */}
-      {tab==="stats"&&<StatsTab refuels={refuels}/>}
+      {tab==="stats"&&<StatsTab refuels={refuels} garage={garage}/>}
 
       {/* ── STORICO ── */}
-      {tab==="history"&&<HistoryTab refuels={refuels} onDelete={handleDelete}/>}
+      {tab==="history"&&<HistoryTab refuels={refuels} garage={garage} onDelete={handleDelete}/>}
 
       {/* ── GARAGE ── */}
       {tab==="garage"&&<>
@@ -976,7 +1122,7 @@ function App(){
         )}
         {garage.map(v=>{
           const isActive=v.id===activeId;
-          const vRefuels=refuels.filter(r=>r.vehicle&&r.vehicle.toLowerCase().includes(v.model.toLowerCase()));
+          const vRefuels=refuels.filter(r=>resolveVehicleId(r,garage)===v.id);
           return(
             <div key={v.id} className="card-hover fade-in" style={{background:"var(--surface)",borderRadius:"var(--radius-lg)",padding:16,marginBottom:12,border:isActive?"2px solid var(--amber)":"1px solid var(--border)",boxShadow:isActive?"0 0 0 3px rgba(245,166,35,.14)":"none"}}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
@@ -1030,10 +1176,12 @@ function App(){
             🗑️ Reset dati rifornimenti
           </button>
         </div>
+
+        <GPverseFooter/>
       </>}
     </div>
 
-    {showAdd&&<AddRefuelModal vehicle={activeVehicle} lastKm={lastKm} onSave={async r=>{await handleSave(r);setShowAdd(false);}} onClose={()=>setShowAdd(false)}/>}
+    {showAdd&&<AddRefuelModal garage={garage} activeId={activeId} refuels={refuels} onSave={async r=>{await handleSave(r);setShowAdd(false);}} onClose={()=>setShowAdd(false)}/>}
     {showAddVehicle&&<AddVehicleModal onSave={handleAddVehicle} onClose={()=>setShowAddVehicle(false)}/>}
     {showImport&&<ImportModal onImport={handleImport} onClose={()=>setShowImport(false)} activeVehicle={activeVehicle} notify={notify}/>}
     {showExport&&<ExportModal refuels={refuels} onClose={()=>setShowExport(false)}/>}
