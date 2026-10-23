@@ -739,7 +739,7 @@ function ExportModal({refuels,onClose}){
 }
 
 // ─── StatsTab ─────────────────────────────────────────────────────────────────
-function StatsTab({refuels, garage}){
+function StatsTab({refuels, garage, activeId}){
   const [view,setView]=useState("km_year"); const [selY,setSelY]=useState(null);
   const [vehFilter,setVehFilter]=useState("all");
 
@@ -787,7 +787,7 @@ function StatsTab({refuels, garage}){
     return {min,max};
   },[filtered]);
 
-  const VIEWS=[{id:"km_year",l:"🛣️ Km/Anno"},{id:"km_month",l:"📅 Km/Mese"},{id:"price_month",l:"💶 Prezzo/Mese"},{id:"price_year",l:"📈 Prezzo/Anno"},{id:"spesa_month",l:"🧾 Spesa/Mese"},{id:"spesa_year",l:"🧾 Spesa/Anno"},{id:"consumo",l:"⚡ Consumo"},{id:"costkm",l:"💰 Costo/Km"},{id:"confronto",l:"📊 Confronto mese"}];
+  const VIEWS=[{id:"km_year",l:"🛣️ Km/Anno"},{id:"price_year",l:"📈 Prezzo/Anno"},{id:"km_month",l:"📅 Km/Mese"},{id:"price_month",l:"💶 Prezzo/Mese"},{id:"spesa_month",l:"🧾 Spesa/Mese"},{id:"spesa_year",l:"🧾 Spesa/Anno"},{id:"consumo",l:"⚡ Consumo"},{id:"costkm",l:"💰 Costo/Km"},{id:"confronto",l:"📊 Confronto mese"}];
   const needsYear=["km_month","price_month","spesa_month","consumo","costkm"].includes(view);
 
   const Delta=({cur,prev,invert})=>{
@@ -803,7 +803,7 @@ function StatsTab({refuels, garage}){
   return(<div>
     {garage.length>1&&<div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:10}}>
       <button onClick={()=>setVehFilter("all")} style={{background:vehFilter==="all"?"var(--blue)":"var(--surface)",color:"#fff",border:"none",borderRadius:20,padding:"5px 12px",cursor:"pointer",fontSize:12,fontWeight:vehFilter==="all"?700:400}}>🚘 Tutti i veicoli</button>
-      {garage.map(v=><button key={v.id} onClick={()=>setVehFilter(v.id)} style={{background:vehFilter===v.id?"var(--blue)":"var(--surface)",color:"#fff",border:"none",borderRadius:20,padding:"5px 12px",cursor:"pointer",fontSize:12,fontWeight:vehFilter===v.id?700:400}}>{v.brand} {v.model}</button>)}
+      {garage.map(v=><button key={v.id} onClick={()=>setVehFilter(v.id)} style={{background:vehFilter===v.id?"var(--blue)":"var(--surface)",color:"#fff",border:"none",borderRadius:20,padding:"5px 12px",cursor:"pointer",fontSize:12,fontWeight:vehFilter===v.id?700:400}}>{v.brand} {v.model}{v.id===activeId?" ⭐":""}</button>)}
     </div>}
     {vehFilter==="all"&&garage.length>1&&["km_year","km_month","consumo","costkm"].includes(view)&&
       <div style={{fontSize:11,color:"var(--text-faint)",marginBottom:10,marginTop:-4}}>ℹ️ Km/consumo sommati su tutti i veicoli: seleziona un'auto sopra per un dato preciso</div>}
@@ -814,7 +814,17 @@ function StatsTab({refuels, garage}){
     {view==="km_year"&&<StatCard title="🛣️ Km/anno" sub="Distanza totale per anno"><BarChart data={kmByYear} color="#3b82f6" fmt={v=>v>0?`${(v/1000).toFixed(1)}k`:"0"}/><StatTable rows={kmByYear.map(d=>({Anno:d.label,"Km":d.value>0?`${d.value.toLocaleString("it-IT")} km`:"N/D"}))}/></StatCard>}
     {view==="km_month"&&<StatCard title={`📅 Km/mese — ${yr}`} sub="Distanza mensile"><BarChart data={kmByMonth} color="#3b82f6" fmt={v=>v>0?`${v}`:"–"}/><StatTable rows={kmByMonth.filter(d=>d.value>0).map(d=>({Mese:d.label,"Km":`${d.value.toLocaleString("it-IT")} km`}))}/></StatCard>}
     {view==="price_month"&&<StatCard title={`💶 Prezzo/mese — ${yr}`} sub="Prezzo medio al litro"><LineChart data={priceMonth} color="var(--amber)"/><StatTable rows={priceMonth.filter(d=>d.value>0).map(d=>({Mese:d.label,"€/L":`€ ${d.value.toFixed(3)}`}))}/></StatCard>}
-    {view==="price_year"&&<StatCard title="📈 Prezzo/anno" sub="Prezzo medio al litro per anno"><LineChart data={priceYear} color="var(--amber)"/><StatTable rows={priceYear.map(d=>({Anno:d.label,"€/L":`€ ${d.value.toFixed(3)}`}))}/></StatCard>}
+    {view==="price_year"&&<StatCard title="📈 Prezzo benzina negli anni" sub="Prezzo medio al litro pagato, anno per anno">
+      <LineChart data={priceYear} color="var(--amber)"/>
+      <StatTable rows={priceYear.map((d,i)=>{
+        const prevV=i>0?priceYear[i-1].value:null;
+        const pct=(prevV&&prevV>0)?((d.value-prevV)/prevV*100):null;
+        return {Anno:d.label,"€/L":`€ ${d.value.toFixed(3)}`,"vs anno prec.":pct!=null?`${pct>=0?"▲":"▼"} ${Math.abs(pct).toFixed(1)}%`:"–"};
+      })}/>
+      {priceRecords&&<div style={{marginTop:14,paddingTop:12,borderTop:"1px solid var(--border)",fontSize:12,color:"var(--text-dim)"}}>
+        🏆 Minimo storico: <strong style={{color:"var(--green)"}}>€ {priceRecords.min.pricePerLiter.toFixed(3)}</strong> il {fmtDate(priceRecords.min.datetime)} · massimo: <strong style={{color:"var(--red)"}}>€ {priceRecords.max.pricePerLiter.toFixed(3)}</strong> il {fmtDate(priceRecords.max.datetime)}
+      </div>}
+    </StatCard>}
     {view==="spesa_month"&&<StatCard title={`🧾 Spesa/mese — ${yr}`} sub="Importo mensile"><BarChart data={spesaMonth} color="#ec4899" fmt={v=>v>0?`€${v.toFixed(0)}`:"–"}/><StatTable rows={spesaMonth.filter(d=>d.value>0).map(d=>({Mese:d.label,Spesa:`€ ${d.value.toFixed(2)}`}))}/></StatCard>}
     {view==="spesa_year"&&<StatCard title="🧾 Spesa/anno" sub="Spesa totale per anno"><BarChart data={spesaYear} color="#ec4899" fmt={v=>`€${v.toFixed(0)}`}/><StatTable rows={spesaYear.map(d=>({Anno:d.label,Spesa:`€ ${d.value.toFixed(2)}`}))}/></StatCard>}
     {view==="consumo"&&<StatCard title={`⚡ Consumo/mese — ${yr}`} sub="L/100km per mese"><LineChart data={consumoMonth} color="#22d3ee"/><StatTable rows={consumoMonth.filter(d=>d.value>0).map(d=>({Mese:d.label,"L/100km":`${d.value.toFixed(2)} L`}))}/></StatCard>}
@@ -841,7 +851,7 @@ function StatsTab({refuels, garage}){
 // ─── HistoryTab ───────────────────────────────────────────────────────────────
 const PAGE_SIZE = 50;
 
-function HistoryTab({refuels, garage, onDelete}){
+function HistoryTab({refuels, garage, onDelete, activeId}){
   const [vehFilter, setVehFilter] = useState("all");
   const filtered = useMemo(()=>{
     if(vehFilter==="all") return refuels;
@@ -890,7 +900,7 @@ function HistoryTab({refuels, garage, onDelete}){
 
     {garage.length>1&&<div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:12}}>
       <button onClick={()=>setVehFilter("all")} style={{background:vehFilter==="all"?"var(--blue)":"var(--surface)",color:"#fff",border:"none",borderRadius:20,padding:"5px 12px",cursor:"pointer",fontSize:12,fontWeight:vehFilter==="all"?700:400}}>🚘 Tutti i veicoli</button>
-      {garage.map(v=><button key={v.id} onClick={()=>setVehFilter(v.id)} style={{background:vehFilter===v.id?"var(--blue)":"var(--surface)",color:"#fff",border:"none",borderRadius:20,padding:"5px 12px",cursor:"pointer",fontSize:12,fontWeight:vehFilter===v.id?700:400}}>{v.brand} {v.model}</button>)}
+      {garage.map(v=><button key={v.id} onClick={()=>setVehFilter(v.id)} style={{background:vehFilter===v.id?"var(--blue)":"var(--surface)",color:"#fff",border:"none",borderRadius:20,padding:"5px 12px",cursor:"pointer",fontSize:12,fontWeight:vehFilter===v.id?700:400}}>{v.brand} {v.model}{v.id===activeId?" ⭐":""}</button>)}
     </div>}
 
     {/* Selezione anno */}
@@ -993,6 +1003,7 @@ function App(){
   const activeVehicle=garage.find(v=>v.id===activeId)||null;
 
   const [tab,setTab]=useState("dashboard");
+  const [dashVeh,setDashVeh]=useState("all");
   const [showAdd,setShowAdd]=useState(false);
   const [showAddVehicle,setShowAddVehicle]=useState(false);
   const [showImport,setShowImport]=useState(false);
@@ -1010,19 +1021,34 @@ function App(){
   const handleRemoveVehicle=async id=>{if(!confirm("Rimuovere questo veicolo dal garage?"))return;try{await removeVehicle(id);notify("Veicolo rimosso","error");}catch(e){notify("❌ "+e.message,"error");}};
   const handleSetActive=async id=>{try{await setActive(id);const v=garage.find(x=>x.id===id);if(v)notify(`🚗 ${v.brand} ${v.model} ora attivo`);}catch(e){notify("❌ "+e.message,"error");}};
 
-  const tot=refuels.reduce((s,r)=>s+(r.amount||0),0);
-  const totKm=refuels.reduce((s,r)=>s+(r.kmDelta>0?r.kmDelta:0),0);
-  const avgP=refuels.length?refuels.reduce((s,r)=>s+(r.pricePerLiter||0),0)/refuels.length:0;
-  const vc=refuels.filter(r=>r.amount&&r.kmDelta&&r.pricePerLiter);
+  // dati filtrati per il veicolo selezionato nella Dashboard ("Tutti i veicoli" di default:
+  // le statistiche globali restano, ma selezionando un'auto si vedono solo i suoi dati)
+  const dashRefuels=useMemo(()=>dashVeh==="all"?refuels:refuels.filter(r=>resolveVehicleId(r,garage)===dashVeh),[refuels,garage,dashVeh]);
+
+  const tot=dashRefuels.reduce((s,r)=>s+(r.amount||0),0);
+  const totKm=dashRefuels.reduce((s,r)=>s+(r.kmDelta>0?r.kmDelta:0),0);
+  const avgP=dashRefuels.length?dashRefuels.reduce((s,r)=>s+(r.pricePerLiter||0),0)/dashRefuels.length:0;
+  const vc=dashRefuels.filter(r=>r.amount&&r.kmDelta&&r.pricePerLiter);
   const avgC=vc.length?vc.reduce((s,r)=>s+r.amount/r.pricePerLiter/r.kmDelta*100,0)/vc.length:0;
 
   // ultimo prezzo pagato vs media storica — per avere subito sott'occhio l'effetto
   // dei recenti aumenti del prezzo della benzina
-  const pricedRefuels=refuels.filter(r=>r.pricePerLiter);
+  const pricedRefuels=dashRefuels.filter(r=>r.pricePerLiter);
   const lastPrice=pricedRefuels.length?pricedRefuels[pricedRefuels.length-1].pricePerLiter:null;
   const priorPriced=pricedRefuels.slice(0,-1);
   const priorAvgPrice=priorPriced.length?priorPriced.reduce((s,r)=>s+r.pricePerLiter,0)/priorPriced.length:null;
   const priceTrendPct=(lastPrice!=null&&priorAvgPrice)?((lastPrice-priorAvgPrice)/priorAvgPrice*100):null;
+
+  // riepilogo per veicolo — le statistiche globali non vanno confuse tra auto diverse:
+  // qui ogni auto ha il suo conteggio, indipendentemente dal filtro scelto sopra
+  const perVehicleStats=useMemo(()=>garage.map(v=>{
+    const vr=refuels.filter(r=>belongsToVehicle(r,v));
+    const vTot=vr.reduce((s,r)=>s+(r.amount||0),0);
+    const vKm=vr.reduce((s,r)=>s+(r.kmDelta>0?r.kmDelta:0),0);
+    const vVc=vr.filter(r=>r.amount&&r.kmDelta&&r.pricePerLiter);
+    const vAvgC=vVc.length?vVc.reduce((s,r)=>s+r.amount/r.pricePerLiter/r.kmDelta*100,0)/vVc.length:0;
+    return {vehicle:v,count:vr.length,tot:vTot,km:vKm,avgC:vAvgC};
+  }),[refuels,garage]);
 
   const TABS=[
     {id:"dashboard",e:"📊",t:"Dashboard"},
@@ -1065,6 +1091,10 @@ function App(){
 
       {/* ── DASHBOARD ── */}
       {tab==="dashboard"&&<>
+        {garage.length>1&&<div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:12}}>
+          <button onClick={()=>setDashVeh("all")} style={{background:dashVeh==="all"?"var(--blue)":"var(--surface)",color:"#fff",border:"none",borderRadius:20,padding:"5px 12px",cursor:"pointer",fontSize:12,fontWeight:dashVeh==="all"?700:400}}>🚘 Tutti i veicoli</button>
+          {garage.map(v=><button key={v.id} onClick={()=>setDashVeh(v.id)} style={{background:dashVeh===v.id?"var(--blue)":"var(--surface)",color:"#fff",border:"none",borderRadius:20,padding:"5px 12px",cursor:"pointer",fontSize:12,fontWeight:dashVeh===v.id?700:400}}>{v.brand} {v.model}{v.id===activeId?" ⭐":""}</button>)}
+        </div>}
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:16}}>
           {[
             {l:"Totale speso",v:`€ ${tot.toFixed(2)}`,i:"💶",c:"#3b6ef0"},
@@ -1082,10 +1112,25 @@ function App(){
             </div>
           ))}
         </div>
+        {dashVeh==="all"&&garage.length>1&&<div style={{background:"var(--surface)",borderRadius:14,padding:16,marginBottom:16}}>
+          <div style={{fontWeight:700,marginBottom:10,fontSize:14}}>🚘 Per veicolo</div>
+          {perVehicleStats.map(ps=>(
+            <div key={ps.vehicle.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"9px 0",borderBottom:"1px solid var(--border)"}}>
+              <div style={{minWidth:0}}>
+                <div style={{fontSize:13,fontWeight:700}}>{ps.vehicle.brand} {ps.vehicle.model}{ps.vehicle.id===activeId?" ⭐":""}</div>
+                <div style={{fontSize:11,color:"var(--text-faint)",marginTop:1}}>{ps.count} rifornimenti{ps.km>0?` · ${ps.km.toLocaleString("it-IT")} km`:""}</div>
+              </div>
+              <div style={{textAlign:"right",flexShrink:0}}>
+                <div style={{color:"var(--amber)",fontWeight:700,fontSize:13}}>€ {ps.tot.toFixed(2)}</div>
+                <div style={{fontSize:11,color:"var(--text-dim)"}}>{ps.avgC>0?`${ps.avgC.toFixed(1)} L/100km`:"–"}</div>
+              </div>
+            </div>
+          ))}
+        </div>}
         <div style={{background:"var(--surface)",borderRadius:14,padding:16,marginBottom:16}}>
           <div style={{fontWeight:700,marginBottom:10,fontSize:14}}>📅 Ultimi rifornimenti</div>
-          {!refuels.length&&<div style={{color:"var(--text-faint)",fontSize:13}}>Nessun rifornimento. Aggiungine uno!</div>}
-          {[...refuels].slice(-5).reverse().map(r=>(
+          {!dashRefuels.length&&<div style={{color:"var(--text-faint)",fontSize:13}}>Nessun rifornimento. Aggiungine uno!</div>}
+          {[...dashRefuels].slice(-5).reverse().map(r=>(
             <div key={r.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 0",borderBottom:"1px solid var(--border)"}}>
               <div>
                 <div style={{fontSize:13,fontWeight:600}}>{fmtDate(r.datetime)} · {r.fuelType}</div>
@@ -1098,15 +1143,15 @@ function App(){
             </div>
           ))}
         </div>
-        <div style={{marginTop:4,fontSize:11,color:"#475569",textAlign:"center"}}>☁️ Sincronizzato su Firebase{garage.length>1?" · dati di tutti i veicoli — dettaglio per veicolo in Statistiche":""}</div>
+        <div style={{marginTop:4,fontSize:11,color:"#475569",textAlign:"center"}}>☁️ Sincronizzato su Firebase{garage.length>1?(dashVeh==="all"?" · tutti i veicoli":` · solo ${garage.find(v=>v.id===dashVeh)?.brand||""} ${garage.find(v=>v.id===dashVeh)?.model||""}`):""}</div>
         <GPverseFooter/>
       </>}
 
       {/* ── STATISTICHE ── */}
-      {tab==="stats"&&<StatsTab refuels={refuels} garage={garage}/>}
+      {tab==="stats"&&<StatsTab refuels={refuels} garage={garage} activeId={activeId}/>}
 
       {/* ── STORICO ── */}
-      {tab==="history"&&<HistoryTab refuels={refuels} garage={garage} onDelete={handleDelete}/>}
+      {tab==="history"&&<HistoryTab refuels={refuels} garage={garage} onDelete={handleDelete} activeId={activeId}/>}
 
       {/* ── GARAGE ── */}
       {tab==="garage"&&<>
