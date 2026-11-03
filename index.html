@@ -96,7 +96,15 @@ const GDRIVE_SCOPE     = "https://www.googleapis.com/auth/drive.readonly";
 // Elettrico non ha un prezzo al distributore: escluso dalla ricerca benzinai.
 const MISE_FUEL_CODE = {Benzina:"1", Diesel:"2", GPL:"4", Metano:"3", Ibrido:"1"};
 const MISE_API = "https://carburanti.mise.gov.it/ospzApi/search/zone";
-const CORS_PROXY = "https://corsproxy.io/?url=";
+// Cascata di proxy CORS gratuiti per la ricerca benzinai: nessuno di questi servizi
+// pubblici è garantito al 100% (possono avere limiti di traffico o smettere di
+// funzionare senza preavviso), quindi si prova in sequenza finché uno risponde.
+const CORS_PROXIES = [
+  url => url,                                                    // 1) chiamata diretta (se mai il sito abilitasse CORS)
+  url => "https://corsproxy.io/?url="+encodeURIComponent(url),   // 2) corsproxy.io
+  url => "https://test.cors.workers.dev/?"+encodeURIComponent(url), // 3) cors-anywhere su Cloudflare Workers
+  url => "https://thingproxy.freeboard.io/fetch/"+url,           // 4) thingproxy
+];
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 const fmtDate = d => d ? new Date(d).toLocaleDateString("it-IT") : "";
@@ -392,8 +400,9 @@ function GPverseFooter(){
 // ─── NearbyStationsModal (benzinai vicini + prezzo più basso) ──────────────────
 // Usa la posizione GPS del dispositivo + l'Osservatorio Prezzi Carburanti del
 // Ministero (MIMIT, dati pubblici senza chiave). L'API non espone CORS per
-// chiamate da altri domini: si prova la chiamata diretta e, se fallisce, si
-// passa dallo stesso proxy CORS già usato per CarQuery nel Garage.
+// chiamate da altri domini: si prova la chiamata diretta e poi una cascata di
+// proxy CORS pubblici gratuiti (vedi CORS_PROXIES) finché uno risponde — nessun
+// singolo proxy gratuito è garantito al 100%, da qui il tentativo multiplo.
 function NearbyStationsModal({defaultFuel, onClose}){
   const [status,setStatus]=useState("locating"); // locating | loading | done | error
   const [errMsg,setErrMsg]=useState("");
@@ -407,14 +416,22 @@ function NearbyStationsModal({defaultFuel, onClose}){
     const fuelCode=MISE_FUEL_CODE[fuelLabel]||"1";
     const body=JSON.stringify({points:[{lat,lng}],radius:rad,fuelType:`${fuelCode}-x`,priceOrder:"asc"});
     const doFetch=async url=>{
-      const r=await fetch(url,{method:"POST",headers:{"Content-Type":"application/json"},body});
-      if(!r.ok) throw new Error("HTTP "+r.status);
-      return r.json();
+      const ctrl=new AbortController(); const t=setTimeout(()=>ctrl.abort(),8000);
+      try{
+        const r=await fetch(url,{method:"POST",headers:{"Content-Type":"application/json"},body,signal:ctrl.signal});
+        if(!r.ok) throw new Error("HTTP "+r.status);
+        const j=await r.json();
+        if(!j||!Array.isArray(j.results)) throw new Error("risposta inattesa");
+        return j;
+      } finally { clearTimeout(t); }
     };
+    let data=null, lastErr=null;
+    for(const wrap of CORS_PROXIES){
+      try{ data=await doFetch(wrap(MISE_API)); break; }
+      catch(e){ lastErr=e; }
+    }
     try{
-      let data;
-      try{ data=await doFetch(MISE_API); }
-      catch{ data=await doFetch(CORS_PROXY+encodeURIComponent(MISE_API)); }
+      if(!data) throw lastErr||new Error("nessun proxy disponibile");
       const list=(data.results||[]).map(s=>{
         const match=(s.fuels||[]).find(f=>String(f.fuelId)===fuelCode);
         if(!match) return null;
