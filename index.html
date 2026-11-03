@@ -92,10 +92,24 @@ const MONTHS_IT   = ["Gen","Feb","Mar","Apr","Mag","Giu","Lug","Ago","Set","Ott"
 const GDRIVE_CLIENT_ID = "186081684364-o5vsskphmdp9t9j3eenbo6sns6m6j56c.apps.googleusercontent.com";
 const GDRIVE_SCOPE     = "https://www.googleapis.com/auth/drive.readonly";
 
+// Mappa FUEL_TYPES → codice carburante dell'Osservatorio Prezzi Carburanti (MIMIT).
+// Elettrico non ha un prezzo al distributore: escluso dalla ricerca benzinai.
+const MISE_FUEL_CODE = {Benzina:"1", Diesel:"2", GPL:"4", Metano:"3", Ibrido:"1"};
+const MISE_API = "https://carburanti.mise.gov.it/ospzApi/search/zone";
+const CORS_PROXY = "https://corsproxy.io/?url=";
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 const fmtDate = d => d ? new Date(d).toLocaleDateString("it-IT") : "";
 const fmtTime = d => d ? new Date(d).toLocaleTimeString("it-IT",{hour:"2-digit",minute:"2-digit"}) : "";
 const nowISO  = () => new Date().toISOString();
+// distanza in km tra due coordinate (formula haversine)
+function distKm(lat1,lng1,lat2,lng2){
+  if(lat1==null||lng1==null||lat2==null||lng2==null) return null;
+  const R=6371, toRad=d=>d*Math.PI/180;
+  const dLat=toRad(lat2-lat1), dLng=toRad(lng2-lng1);
+  const a=Math.sin(dLat/2)**2+Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLng/2)**2;
+  return R*2*Math.atan2(Math.sqrt(a),Math.sqrt(1-a));
+}
 
 // Risolve l'id veicolo di un rifornimento: usa vehicleId se presente (rifornimenti nuovi),
 // altrimenti matcha il testo libero "vehicle" con un veicolo del garage (CSV / dati vecchi).
@@ -372,6 +386,103 @@ function GPverseFooter(){
       <img src={GPVERSE_LOGO} alt="GPverse" style={{width:16,height:16,borderRadius:4}}/>
       <span style={{fontSize:10,color:"var(--text-faint)",letterSpacing:".3px"}}>Un progetto GPverse</span>
     </div>
+  );
+}
+
+// ─── NearbyStationsModal (benzinai vicini + prezzo più basso) ──────────────────
+// Usa la posizione GPS del dispositivo + l'Osservatorio Prezzi Carburanti del
+// Ministero (MIMIT, dati pubblici senza chiave). L'API non espone CORS per
+// chiamate da altri domini: si prova la chiamata diretta e, se fallisce, si
+// passa dallo stesso proxy CORS già usato per CarQuery nel Garage.
+function NearbyStationsModal({defaultFuel, onClose}){
+  const [status,setStatus]=useState("locating"); // locating | loading | done | error
+  const [errMsg,setErrMsg]=useState("");
+  const [stations,setStations]=useState([]);
+  const [coords,setCoords]=useState(null);
+  const [fuel,setFuel]=useState(MISE_FUEL_CODE[defaultFuel]?defaultFuel:"Benzina");
+  const [radius,setRadius]=useState(5);
+
+  const runSearch=async(lat,lng,fuelLabel,rad)=>{
+    setStatus("loading"); setErrMsg("");
+    const fuelCode=MISE_FUEL_CODE[fuelLabel]||"1";
+    const body=JSON.stringify({points:[{lat,lng}],radius:rad,fuelType:`${fuelCode}-x`,priceOrder:"asc"});
+    const doFetch=async url=>{
+      const r=await fetch(url,{method:"POST",headers:{"Content-Type":"application/json"},body});
+      if(!r.ok) throw new Error("HTTP "+r.status);
+      return r.json();
+    };
+    try{
+      let data;
+      try{ data=await doFetch(MISE_API); }
+      catch{ data=await doFetch(CORS_PROXY+encodeURIComponent(MISE_API)); }
+      const list=(data.results||[]).map(s=>{
+        const match=(s.fuels||[]).find(f=>String(f.fuelId)===fuelCode);
+        if(!match) return null;
+        const sLat=s.location&&s.location.lat, sLng=s.location&&s.location.lng;
+        return {id:s.id, name:s.name, brand:s.brand, address:s.address, price:match.price, isSelf:match.isSelf, dist:distKm(lat,lng,sLat,sLng), lat:sLat, lng:sLng};
+      }).filter(Boolean).sort((a,b)=>a.price-b.price);
+      setStations(list); setStatus("done");
+    }catch(e){
+      setStatus("error");
+      setErrMsg("Non riesco a contattare il servizio prezzi carburanti del Ministero. Riprova più tardi.");
+    }
+  };
+
+  const locate=()=>{
+    setStatus("locating"); setErrMsg("");
+    if(!navigator.geolocation){ setStatus("error"); setErrMsg("Questo dispositivo non supporta la geolocalizzazione."); return; }
+    navigator.geolocation.getCurrentPosition(
+      pos=>{ const c={lat:pos.coords.latitude,lng:pos.coords.longitude}; setCoords(c); runSearch(c.lat,c.lng,fuel,radius); },
+      err=>{ setStatus("error"); setErrMsg(err.code===1?"Permesso di localizzazione negato — abilitalo per usare questa funzione.":"Impossibile rilevare la posizione attuale."); },
+      {enableHighAccuracy:true,timeout:12000,maximumAge:60000}
+    );
+  };
+
+  useEffect(()=>{ locate(); /* eslint-disable-next-line */ },[]);
+
+  const changeFuel=f=>{ setFuel(f); if(coords) runSearch(coords.lat,coords.lng,f,radius); };
+  const changeRadius=r=>{ setRadius(r); if(coords) runSearch(coords.lat,coords.lng,fuel,r); };
+
+  return(
+    <Modal title="📍 Benzinai vicino a te" onClose={onClose}>
+      <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:10}}>
+        {FUEL_TYPES.filter(f=>MISE_FUEL_CODE[f]).map(f=>
+          <button key={f} onClick={()=>changeFuel(f)} style={{background:fuel===f?"var(--blue)":"var(--surface-2)",color:"#fff",border:"none",borderRadius:20,padding:"5px 12px",cursor:"pointer",fontSize:12,fontWeight:fuel===f?700:400}}>{f}</button>
+        )}
+      </div>
+      <div style={{display:"flex",gap:6,marginBottom:14}}>
+        {[5,10,20].map(r=>
+          <button key={r} onClick={()=>changeRadius(r)} style={{background:radius===r?"var(--amber)":"var(--surface-2)",color:radius===r?"#000":"#e2e8f0",border:"none",borderRadius:20,padding:"5px 14px",cursor:"pointer",fontSize:12,fontWeight:700}}>{r} km</button>
+        )}
+      </div>
+
+      {status==="locating"&&<div style={{textAlign:"center",color:"var(--text-faint)",padding:30}}><div style={{fontSize:36}}>📡</div><div style={{marginTop:10,fontSize:13}}>Rilevo la tua posizione...</div></div>}
+      {status==="loading"&&<div style={{textAlign:"center",color:"var(--text-faint)",padding:30}}><div style={{fontSize:36}}>⛽</div><div style={{marginTop:10,fontSize:13}}>Cerco i benzinai vicini...</div></div>}
+      {status==="error"&&<div style={{textAlign:"center",color:"var(--text-faint)",padding:20}}>
+        <div style={{fontSize:36}}>⚠️</div>
+        <div style={{marginTop:10,fontSize:13,color:"#fca5a5"}}>{errMsg}</div>
+        <button onClick={locate} style={{marginTop:14,background:"var(--border)",color:"#e2e8f0",border:"none",borderRadius:8,padding:"9px 16px",cursor:"pointer",fontSize:13,fontWeight:600}}>🔄 Riprova</button>
+      </div>}
+      {status==="done"&&<>
+        {!stations.length&&<div style={{textAlign:"center",color:"var(--text-faint)",padding:20,fontSize:13}}>Nessun benzinaio trovato entro {radius} km con dati di prezzo per {fuel}.</div>}
+        {stations.map((s,i)=>(
+          <div key={s.id} style={{background:i===0?"rgba(52,211,153,.10)":"var(--surface-2)",border:i===0?"1px solid var(--green)":"1px solid var(--border)",borderRadius:12,padding:"12px 14px",marginBottom:8}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:10}}>
+              <div style={{minWidth:0}}>
+                <div style={{fontWeight:700,fontSize:14}}>{i===0?"🏆 ":""}{s.brand||s.name}</div>
+                <div style={{fontSize:11,color:"var(--text-dim)",marginTop:2}}>{s.address}</div>
+                <div style={{fontSize:11,color:"var(--text-faint)",marginTop:2}}>{s.dist!=null?`📍 ${s.dist.toFixed(1)} km`:""}{s.isSelf!=null?` · ${s.isSelf?"self":"servito"}`:""}</div>
+              </div>
+              <div style={{textAlign:"right",flexShrink:0}}>
+                <div style={{fontWeight:800,fontSize:16,color:i===0?"var(--green)":"var(--amber)"}}>€ {s.price.toFixed(3)}</div>
+                {s.lat!=null&&<a href={`https://www.google.com/maps/search/?api=1&query=${s.lat},${s.lng}`} target="_blank" rel="noopener noreferrer" style={{fontSize:11,color:"var(--blue)",textDecoration:"none"}}>🗺️ Mappa</a>}
+              </div>
+            </div>
+          </div>
+        ))}
+        <div style={{fontSize:10,color:"var(--text-faint)",textAlign:"center",marginTop:8}}>Dati: Osservatorio Prezzi Carburanti, Ministero delle Imprese e del Made in Italy</div>
+      </>}
+    </Modal>
   );
 }
 
@@ -1009,6 +1120,7 @@ function App(){
   const [showImport,setShowImport]=useState(false);
   const [showExport,setShowExport]=useState(false);
   const [showReset,setShowReset]=useState(false);
+  const [showNearby,setShowNearby]=useState(false);
   const [notif,setNotif]=useState(null);
 
   const notify=(msg,type="success")=>{setNotif({msg,type});setTimeout(()=>setNotif(null),3500);};
@@ -1095,6 +1207,14 @@ function App(){
           <button onClick={()=>setDashVeh("all")} style={{background:dashVeh==="all"?"var(--blue)":"var(--surface)",color:"#fff",border:"none",borderRadius:20,padding:"5px 12px",cursor:"pointer",fontSize:12,fontWeight:dashVeh==="all"?700:400}}>🚘 Tutti i veicoli</button>
           {garage.map(v=><button key={v.id} onClick={()=>setDashVeh(v.id)} style={{background:dashVeh===v.id?"var(--blue)":"var(--surface)",color:"#fff",border:"none",borderRadius:20,padding:"5px 12px",cursor:"pointer",fontSize:12,fontWeight:dashVeh===v.id?700:400}}>{v.brand} {v.model}{v.id===activeId?" ⭐":""}</button>)}
         </div>}
+        <button onClick={()=>setShowNearby(true)} style={{width:"100%",background:"var(--surface)",border:"1px solid var(--border)",borderRadius:"var(--radius-md)",padding:"13px 16px",marginBottom:16,cursor:"pointer",display:"flex",alignItems:"center",gap:10,color:"#e2e8f0"}}>
+          <span style={{fontSize:20}}>📍</span>
+          <span style={{textAlign:"left",flex:1}}>
+            <span style={{display:"block",fontSize:13,fontWeight:700}}>Benzinaio più economico vicino a te</span>
+            <span style={{display:"block",fontSize:11,color:"var(--text-faint)",marginTop:1}}>Usa la posizione GPS e l'Osservatorio Prezzi Carburanti</span>
+          </span>
+          <span style={{fontSize:14,color:"var(--text-faint)"}}>›</span>
+        </button>
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:16}}>
           {[
             {l:"Totale speso",v:`€ ${tot.toFixed(2)}`,i:"💶",c:"#3b6ef0"},
@@ -1231,6 +1351,7 @@ function App(){
     {showImport&&<ImportModal onImport={handleImport} onClose={()=>setShowImport(false)} activeVehicle={activeVehicle} notify={notify}/>}
     {showExport&&<ExportModal refuels={refuels} onClose={()=>setShowExport(false)}/>}
     {showReset&&<ResetConfirmModal count={refuels.length} onConfirm={handleReset} onClose={()=>setShowReset(false)}/>}
+    {showNearby&&<NearbyStationsModal defaultFuel={(dashVeh==="all"?activeVehicle:garage.find(v=>v.id===dashVeh))?.fuel||"Benzina"} onClose={()=>setShowNearby(false)}/>}
   </div>);
 }
 
